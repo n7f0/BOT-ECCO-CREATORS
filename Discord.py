@@ -618,17 +618,21 @@ class LiveConfigView(View):
         await interaction.message.edit(embed=embed, view=self)
         await interaction.followup.send("✅ Horas de todos os streamers resetadas.", ephemeral=True)
 
-# ---- MODAL COM 5 CAMPOS (sem servidor destino) ----
+# ---- MODAL COM 5 CAMPOS SEPARADOS (sem observação) ----
 class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
-    canais = TextInput(
-        label="Canais (LIVE;STAFF) separados por ;",
-        placeholder="Ex: 123,456;789,101",
+    live_canais = TextInput(
+        label="IDs dos canais LIVE (separados por vírgula)",
+        placeholder="Ex: 123456789,987654321",
         required=True
     )
-    cargo_live = TextInput(label="ID cargo ping (live)", required=True)
-    cargo_staff = TextInput(label="ID cargo ping (staff)", required=True)
-    cargo_admin = TextInput(label="ID cargo admin (opcional)", required=False, placeholder="Deixe em branco")
-    observacao = TextInput(label="Observação padrão (opcional)", required=False, placeholder="Mensagem extra")
+    staff_canais = TextInput(
+        label="IDs dos canais STAFF (separados por vírgula)",
+        placeholder="Ex: 123456789,987654321",
+        required=True
+    )
+    cargo_live = TextInput(label="ID do cargo para ping (live)", required=True)
+    cargo_staff = TextInput(label="ID do cargo para ping (staff)", required=True)
+    cargo_admin = TextInput(label="ID do cargo administrador (opcional)", required=False, placeholder="Deixe em branco")
 
     def __init__(self, guild_id, parent_view):
         super().__init__()
@@ -638,24 +642,16 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            raw = self.canais.value.strip()
-            if ';' in raw:
-                live_part, staff_part = raw.split(';', 1)
-            else:
-                live_part = raw
-                staff_part = raw
-
-            live_ids = [int(x.strip()) for x in live_part.split(',') if x.strip().isdigit()]
-            staff_ids = [int(x.strip()) for x in staff_part.split(',') if x.strip().isdigit()]
+            live_ids = [int(x.strip()) for x in self.live_canais.value.split(',') if x.strip().isdigit()]
+            staff_ids = [int(x.strip()) for x in self.staff_canais.value.split(',') if x.strip().isdigit()]
 
             if not live_ids or not staff_ids:
-                await interaction.followup.send("Canais inválidos. Use o formato: 123,456;789,101", ephemeral=True)
+                await interaction.followup.send("Canais inválidos. Certifique-se de digitar IDs numéricos separados por vírgula.", ephemeral=True)
                 return
 
             role_live = int(self.cargo_live.value.strip())
             role_staff = int(self.cargo_staff.value.strip())
             admin_role = int(self.cargo_admin.value.strip()) if self.cargo_admin.value.strip() else None
-            obs = self.observacao.value.strip()
 
             config = dados["lives"]["config"].setdefault(str(self.guild_id), {})
             config["channel_ids_live"] = live_ids
@@ -663,14 +659,13 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
             config["role_live"] = role_live
             config["role_staff"] = role_staff
             config["admin_role"] = admin_role
-            config["observacao_padrao"] = obs
-            # Mantém target_guild existente (não alterado)
+            # Mantém target_guild e observacao_padrao existentes
             if "platforms" not in config:
                 config["platforms"] = {"twitch": True, "youtube": True, "kick": True, "tiktok": True}
 
             await save_config(
                 str(self.guild_id),
-                config.get("target_guild"),  # mantém o valor atual
+                config.get("target_guild"),  # mantém
                 live_ids,
                 staff_ids,
                 role_live,
@@ -678,7 +673,7 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
                 admin_role,
                 config["platforms"],
                 config.get("painel_channel_id"),
-                obs
+                config.get("observacao_padrao", "")  # mantém a observação atual
             )
             await refresh_dados()
             embed = await self.parent_view.build_embed()
