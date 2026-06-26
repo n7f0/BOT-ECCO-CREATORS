@@ -35,16 +35,22 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     async with db_pool.acquire() as conn:
+        # Tabela de configuração (com canais e cargos separados)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS live_config (
                 guild_id TEXT PRIMARY KEY,
                 target_guild_id BIGINT,
-                channel_ids JSONB,
-                role_id BIGINT,
+                channel_ids_live JSONB,
+                channel_ids_staff JSONB,
+                role_live_id BIGINT,
+                role_staff_id BIGINT,
+                admin_role_id BIGINT,
                 platforms JSONB,
-                painel_channel_id BIGINT
+                painel_channel_id BIGINT,
+                observacao_padrao TEXT
             )
         """)
+        # Tabela de streamers (com created_at)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS live_streamers (
                 guild_id TEXT,
@@ -59,25 +65,14 @@ async def init_db():
                 PRIMARY KEY (guild_id, user_id)
             )
         """)
-        await conn.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                               WHERE table_name='live_streamers' AND column_name='created_at') THEN
-                    ALTER TABLE live_streamers ADD COLUMN created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
-                END IF;
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                               WHERE table_name='live_config' AND column_name='painel_channel_id') THEN
-                    ALTER TABLE live_config ADD COLUMN painel_channel_id BIGINT;
-                END IF;
-            END $$;
-        """)
+        # Tabela de último ID notificado (evita spam de live)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS live_last_notified (
                 key TEXT PRIMARY KEY,
                 value TEXT
             )
         """)
+        # Tabela de status (online/offline)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS live_status (
                 guild_id TEXT,
@@ -87,16 +82,18 @@ async def init_db():
                 PRIMARY KEY (guild_id, user_id, platform)
             )
         """)
+        # Tabela de sessões ativas
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS live_sessions (
                 guild_id TEXT,
                 user_id TEXT,
                 platform TEXT,
                 start_time TIMESTAMP WITH TIME ZONE,
-                three_hour_notified BOOLEAN,
+                last_milestone_hours INTEGER DEFAULT 0,
                 PRIMARY KEY (guild_id, user_id, platform)
             )
         """)
+        # Tabela de horas totais acumuladas
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS live_hours (
                 guild_id TEXT,
@@ -105,20 +102,42 @@ async def init_db():
                 PRIMARY KEY (guild_id, user_id)
             )
         """)
+
+        # Migrações para garantir colunas
         await conn.execute("""
             DO $$
             BEGIN
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                               WHERE table_name='live_config' AND column_name='target_guild_id') THEN
-                    ALTER TABLE live_config ADD COLUMN target_guild_id BIGINT;
+                               WHERE table_name='live_config' AND column_name='channel_ids_live') THEN
+                    ALTER TABLE live_config ADD COLUMN channel_ids_live JSONB DEFAULT '[]'::jsonb;
                 END IF;
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                               WHERE table_name='live_config' AND column_name='channel_ids') THEN
-                    ALTER TABLE live_config ADD COLUMN channel_ids JSONB DEFAULT '[]'::jsonb;
+                               WHERE table_name='live_config' AND column_name='channel_ids_staff') THEN
+                    ALTER TABLE live_config ADD COLUMN channel_ids_staff JSONB DEFAULT '[]'::jsonb;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='live_config' AND column_name='role_live_id') THEN
+                    ALTER TABLE live_config ADD COLUMN role_live_id BIGINT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='live_config' AND column_name='role_staff_id') THEN
+                    ALTER TABLE live_config ADD COLUMN role_staff_id BIGINT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='live_config' AND column_name='admin_role_id') THEN
+                    ALTER TABLE live_config ADD COLUMN admin_role_id BIGINT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='live_config' AND column_name='observacao_padrao') THEN
+                    ALTER TABLE live_config ADD COLUMN observacao_padrao TEXT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='live_sessions' AND column_name='last_milestone_hours') THEN
+                    ALTER TABLE live_sessions ADD COLUMN last_milestone_hours INTEGER DEFAULT 0;
                 END IF;
             END $$;
         """)
-    print("✅ Banco de dados PostgreSQL inicializado.")
+        print("✅ Banco de dados PostgreSQL inicializado.")
 
 async def load_all_data():
     dados = {
@@ -132,16 +151,26 @@ async def load_all_data():
         }
     }
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT guild_id, target_guild_id, channel_ids, role_id, platforms, painel_channel_id FROM live_config")
+        # Config
+        rows = await conn.fetch("""
+            SELECT guild_id, target_guild_id, channel_ids_live, channel_ids_staff,
+                   role_live_id, role_staff_id, admin_role_id, platforms, painel_channel_id, observacao_padrao
+            FROM live_config
+        """)
         for r in rows:
             guild_id = r["guild_id"]
             dados["lives"]["config"][guild_id] = {
-                "channel_ids": json.loads(r["channel_ids"]) if r["channel_ids"] else [],
-                "role": r["role_id"],
+                "channel_ids_live": json.loads(r["channel_ids_live"]) if r["channel_ids_live"] else [],
+                "channel_ids_staff": json.loads(r["channel_ids_staff"]) if r["channel_ids_staff"] else [],
+                "role_live": r["role_live_id"],
+                "role_staff": r["role_staff_id"],
+                "admin_role": r["admin_role_id"],
                 "target_guild": r["target_guild_id"],
                 "platforms": json.loads(r["platforms"]) if r["platforms"] else {"twitch": True, "youtube": True, "kick": True, "tiktok": True},
-                "painel_channel_id": r["painel_channel_id"]
+                "painel_channel_id": r["painel_channel_id"],
+                "observacao_padrao": r["observacao_padrao"] or ""
             }
+        # Streamers
         rows = await conn.fetch("SELECT guild_id, user_id, nome, twitch, youtube, kick, tiktok, observacao, created_at FROM live_streamers")
         for r in rows:
             guild_id = r["guild_id"]
@@ -157,9 +186,11 @@ async def load_all_data():
                 "observacao": r["observacao"],
                 "created_at": r["created_at"]
             }
+        # Last notified
         rows = await conn.fetch("SELECT key, value FROM live_last_notified")
         for r in rows:
             dados["lives"]["last_notified"][r["key"]] = r["value"]
+        # Status
         rows = await conn.fetch("SELECT guild_id, user_id, platform, is_live FROM live_status")
         for r in rows:
             guild_id = r["guild_id"]
@@ -170,7 +201,8 @@ async def load_all_data():
             if user_id not in dados["lives"]["status"][guild_id]:
                 dados["lives"]["status"][guild_id][user_id] = {}
             dados["lives"]["status"][guild_id][user_id][platform] = r["is_live"]
-        rows = await conn.fetch("SELECT guild_id, user_id, platform, start_time, three_hour_notified FROM live_sessions")
+        # Sessions
+        rows = await conn.fetch("SELECT guild_id, user_id, platform, start_time, last_milestone_hours FROM live_sessions")
         for r in rows:
             guild_id = r["guild_id"]
             user_id = r["user_id"]
@@ -184,8 +216,9 @@ async def load_all_data():
                 start = start.replace(tzinfo=timezone.utc)
             dados["lives"]["sessions"][guild_id][user_id][platform] = {
                 "start_time": start,
-                "three_hour_notified": r["three_hour_notified"]
+                "last_milestone_hours": r["last_milestone_hours"]
             }
+        # Hours
         rows = await conn.fetch("SELECT guild_id, user_id, total_seconds FROM live_hours")
         for r in rows:
             guild_id = r["guild_id"]
@@ -195,18 +228,26 @@ async def load_all_data():
             dados["lives"]["hours"][guild_id][user_id] = r["total_seconds"]
     return dados
 
-async def save_config(guild_id, target_guild_id, channel_ids, role_id, platforms, painel_channel_id=None):
+# ========= FUNÇÕES DE BANCO =========
+async def save_config(guild_id, target_guild_id, channel_ids_live, channel_ids_staff,
+                      role_live, role_staff, admin_role, platforms, painel_channel_id, observacao_padrao):
     async with db_pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO live_config (guild_id, target_guild_id, channel_ids, role_id, platforms, painel_channel_id)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO live_config (guild_id, target_guild_id, channel_ids_live, channel_ids_staff,
+                                     role_live_id, role_staff_id, admin_role_id, platforms, painel_channel_id, observacao_padrao)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (guild_id) DO UPDATE SET
                 target_guild_id = EXCLUDED.target_guild_id,
-                channel_ids = EXCLUDED.channel_ids,
-                role_id = EXCLUDED.role_id,
+                channel_ids_live = EXCLUDED.channel_ids_live,
+                channel_ids_staff = EXCLUDED.channel_ids_staff,
+                role_live_id = EXCLUDED.role_live_id,
+                role_staff_id = EXCLUDED.role_staff_id,
+                admin_role_id = EXCLUDED.admin_role_id,
                 platforms = EXCLUDED.platforms,
-                painel_channel_id = EXCLUDED.painel_channel_id
-        """, guild_id, target_guild_id, json.dumps(channel_ids), role_id, json.dumps(platforms), painel_channel_id)
+                painel_channel_id = EXCLUDED.painel_channel_id,
+                observacao_padrao = EXCLUDED.observacao_padrao
+        """, guild_id, target_guild_id, json.dumps(channel_ids_live), json.dumps(channel_ids_staff),
+           role_live, role_staff, admin_role, json.dumps(platforms), painel_channel_id, observacao_padrao)
 
 async def save_streamer(guild_id, user_id, nome, twitch, youtube, kick, tiktok, observacao):
     async with db_pool.acquire() as conn:
@@ -244,15 +285,22 @@ async def save_status(guild_id, user_id, platform, is_live):
             ON CONFLICT (guild_id, user_id, platform) DO UPDATE SET is_live = EXCLUDED.is_live
         """, guild_id, user_id, platform, is_live)
 
-async def save_session(guild_id, user_id, platform, start_time, three_hour_notified):
+async def save_session(guild_id, user_id, platform, start_time, last_milestone_hours=0):
     async with db_pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO live_sessions (guild_id, user_id, platform, start_time, three_hour_notified)
+            INSERT INTO live_sessions (guild_id, user_id, platform, start_time, last_milestone_hours)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (guild_id, user_id, platform) DO UPDATE SET
                 start_time = EXCLUDED.start_time,
-                three_hour_notified = EXCLUDED.three_hour_notified
-        """, guild_id, user_id, platform, start_time, three_hour_notified)
+                last_milestone_hours = EXCLUDED.last_milestone_hours
+        """, guild_id, user_id, platform, start_time, last_milestone_hours)
+
+async def update_milestone(guild_id, user_id, platform, milestone_hours):
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE live_sessions SET last_milestone_hours = $1
+            WHERE guild_id = $2 AND user_id = $3 AND platform = $4
+        """, milestone_hours, guild_id, user_id, platform)
 
 async def delete_session(guild_id, user_id, platform):
     async with db_pool.acquire() as conn:
@@ -274,14 +322,35 @@ async def reset_streamer_hours(guild_id, user_id=None):
         else:
             await conn.execute("UPDATE live_hours SET total_seconds = 0 WHERE guild_id = $1", guild_id)
 
+# ========= CARREGAR DADOS =========
 dados = None
 
 async def refresh_dados():
     global dados
     dados = await load_all_data()
 
-def is_admin(member):
-    return member.guild_permissions.administrator
+# ========= FUNÇÕES AUXILIARES =========
+def is_admin(member, guild_id=None):
+    """Verifica se o membro é admin do servidor ou tem o cargo admin configurado."""
+    if member.guild_permissions.administrator:
+        return True
+    if guild_id is not None:
+        config = dados["lives"]["config"].get(str(guild_id), {})
+        admin_role_id = config.get("admin_role")
+        if admin_role_id:
+            role = member.guild.get_role(admin_role_id)
+            if role and role in member.roles:
+                return True
+    return False
+
+def is_staff(member, guild_id):
+    config = dados["lives"]["config"].get(str(guild_id), {})
+    staff_role_id = config.get("role_staff")
+    if staff_role_id:
+        role = member.guild.get_role(staff_role_id)
+        if role and role in member.roles:
+            return True
+    return False
 
 def extract_platform_from_url(url: str):
     url = url.strip().lower()
@@ -319,6 +388,7 @@ def format_date(dt):
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.strftime("%d/%m/%Y às %H:%M")
 
+# ========= USER-AGENT =========
 ua = UserAgent()
 
 def get_headers():
@@ -329,6 +399,7 @@ def get_headers():
         "Referer": "https://www.google.com/",
     }
 
+# ========= VERIFICAÇÃO DE LIVES =========
 twitch_token = None
 twitch_token_expiry = 0
 
@@ -432,10 +503,372 @@ async def check_tiktok_live(username):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, check_tiktok_live_sync, username)
 
-# ============================================================
-# AS CLASSES DO PAINEL (não mudam, mas precisam ser definidas antes do bot)
-# ============================================================
+# ========= ENVIO DE NOTIFICAÇÕES =========
+async def send_notification(canal, content, embed, view=None):
+    try:
+        if view:
+            await canal.send(content=content, embed=embed, view=view)
+        else:
+            await canal.send(content=content, embed=embed)
+    except Exception as e:
+        print(f"Erro ao enviar notificação para {canal.id}: {e}")
 
+async def send_to_channels(guild, channel_ids, role_mention, embed, view=None):
+    for cid in channel_ids:
+        canal = guild.get_channel(cid)
+        if canal:
+            await send_notification(canal, role_mention, embed, view)
+
+# ========= TASK DE VERIFICAÇÃO =========
+@tasks.loop(minutes=1)
+async def live_check_loop():
+    global dados
+    await refresh_dados()
+    for guild_id_str in dados["lives"]["config"]:
+        config = dados["lives"]["config"][guild_id_str]
+        
+        target_guild_id = config.get("target_guild")
+        if target_guild_id:
+            guild = bot.get_guild(target_guild_id)
+        else:
+            guild = bot.get_guild(int(guild_id_str))
+        if not guild:
+            continue
+
+        plataformas = config.get("platforms", {"twitch": True, "youtube": True, "kick": True, "tiktok": True})
+        channel_ids_live = config.get("channel_ids_live", [])
+        channel_ids_staff = config.get("channel_ids_staff", [])
+        role_live_id = config.get("role_live")
+        role_staff_id = config.get("role_staff")
+        role_live_mention = f"<@&{role_live_id}>" if role_live_id and guild.get_role(role_live_id) else ""
+        role_staff_mention = f"<@&{role_staff_id}>" if role_staff_id and guild.get_role(role_staff_id) else ""
+        observacao_padrao = config.get("observacao_padrao", "")
+
+        streamers_dict = dados["lives"]["streamers"].get(guild_id_str, {})
+        status_server = dados["lives"]["status"].setdefault(guild_id_str, {})
+        sessions_server = dados["lives"]["sessions"].setdefault(guild_id_str, {})
+
+        # ----- TWITCH -----
+        if plataformas.get("twitch"):
+            twitch_users = [data.get("twitch") for data in streamers_dict.values() if data.get("twitch")]
+            lives = await check_twitch_lives(twitch_users)
+            for uid, data in streamers_dict.items():
+                twitch_name = data.get("twitch")
+                if not twitch_name:
+                    await save_status(guild_id_str, uid, "twitch", False)
+                    continue
+                is_live = twitch_name.lower() in lives
+                await save_status(guild_id_str, uid, "twitch", is_live)
+                status_server.setdefault(uid, {})["twitch"] = is_live
+
+                if is_live:
+                    live_info = lives[twitch_name.lower()]
+                    title = live_info.get("title", "")
+                    last_key = f"twitch_{uid}"
+                    last_id = dados["lives"]["last_notified"].get(last_key)
+                    stream_id = live_info["id"]
+
+                    if last_id != stream_id:
+                        dados["lives"]["last_notified"][last_key] = stream_id
+                        await save_last_notified(last_key, stream_id)
+                        now_utc = datetime.now(timezone.utc)
+                        await save_session(guild_id_str, uid, "twitch", now_utc, 0)
+
+                        nome = data.get("nome", twitch_name)
+                        obs = data.get("observacao") or observacao_padrao
+                        embed = discord.Embed(title="🔴 LIVE NA TWITCH", color=0x9146ff)
+                        desc = f"**{nome}** está ao vivo na Twitch!"
+                        if obs:
+                            desc += f"\n{obs}"
+                        embed.description = desc
+                        embed.add_field(name="Título", value=title, inline=False)
+                        embed.add_field(name="Link", value=f"https://twitch.tv/{twitch_name}", inline=False)
+                        if 'thumbnail_url' in live_info:
+                            thumb_url = live_info['thumbnail_url'].replace('{width}', '640').replace('{height}', '360')
+                            embed.set_image(url=thumb_url)
+                        embed.set_footer(text="Twitch • " + datetime.now().strftime("%H:%M"))
+                        await send_to_channels(guild, channel_ids_live, role_live_mention, embed)
+                    else:
+                        # Verificar marcos (a cada hora completa)
+                        sess = sessions_server.get(uid, {}).get("twitch")
+                        if sess:
+                            start = sess["start_time"]
+                            if start.tzinfo is None:
+                                start = start.replace(tzinfo=timezone.utc)
+                            elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+                            current_hour = int(elapsed // 3600)
+                            last_milestone = sess.get("last_milestone_hours", 0)
+                            if current_hour > last_milestone and current_hour >= 1:
+                                # Novo marco
+                                await update_milestone(guild_id_str, uid, "twitch", current_hour)
+                                nome = data.get("nome", twitch_name)
+                                obs = data.get("observacao") or observacao_padrao
+                                embed = discord.Embed(title=f"⏰ {current_hour}h DE LIVE NA TWITCH!", color=0xffaa00)
+                                desc = f"**{nome}** está ao vivo há **{current_hour} horas** consecutivas!"
+                                if obs:
+                                    desc += f"\n{obs}"
+                                embed.description = desc
+                                embed.add_field(name="Título", value=title, inline=False)
+                                embed.add_field(name="Link", value=f"https://twitch.tv/{twitch_name}", inline=False)
+                                embed.set_footer(text="Twitch • " + datetime.now().strftime("%H:%M"))
+                                await send_to_channels(guild, channel_ids_staff, role_staff_mention, embed)
+                else:
+                    sess = sessions_server.get(uid, {}).get("twitch")
+                    if sess:
+                        start = sess["start_time"]
+                        if start.tzinfo is None:
+                            start = start.replace(tzinfo=timezone.utc)
+                        duration = (datetime.now(timezone.utc) - start).total_seconds()
+                        if duration > 0:
+                            await add_streamer_hours(guild_id_str, uid, duration)
+                        await delete_session(guild_id_str, uid, "twitch")
+                        if uid in sessions_server and "twitch" in sessions_server[uid]:
+                            del sessions_server[uid]["twitch"]
+
+        # ----- YOUTUBE -----
+        if plataformas.get("youtube"):
+            yt_users = [data.get("youtube") for data in streamers_dict.values() if data.get("youtube")]
+            lives = await check_youtube_lives(yt_users)
+            for uid, data in streamers_dict.items():
+                yt_ch = data.get("youtube")
+                if not yt_ch:
+                    await save_status(guild_id_str, uid, "youtube", False)
+                    continue
+                is_live = yt_ch in lives
+                await save_status(guild_id_str, uid, "youtube", is_live)
+                status_server.setdefault(uid, {})["youtube"] = is_live
+
+                if is_live:
+                    video = lives[yt_ch]
+                    title = video['snippet']['title']
+                    last_key = f"yt_{uid}"
+                    video_id = video["id"]["videoId"]
+                    last_id = dados["lives"]["last_notified"].get(last_key)
+
+                    if last_id != video_id:
+                        dados["lives"]["last_notified"][last_key] = video_id
+                        await save_last_notified(last_key, video_id)
+                        now_utc = datetime.now(timezone.utc)
+                        await save_session(guild_id_str, uid, "youtube", now_utc, 0)
+
+                        nome = data.get("nome", yt_ch)
+                        obs = data.get("observacao") or observacao_padrao
+                        embed = discord.Embed(title="🔴 LIVE NO YOUTUBE", color=0xff0000)
+                        desc = f"**{nome}** está ao vivo no YouTube!"
+                        if obs:
+                            desc += f"\n{obs}"
+                        embed.description = desc
+                        embed.add_field(name="Título", value=title, inline=False)
+                        embed.add_field(name="Link", value=f"https://youtube.com/watch?v={video_id}", inline=False)
+                        embed.set_footer(text="YouTube • " + datetime.now().strftime("%H:%M"))
+                        await send_to_channels(guild, channel_ids_live, role_live_mention, embed)
+                    else:
+                        sess = sessions_server.get(uid, {}).get("youtube")
+                        if sess:
+                            start = sess["start_time"]
+                            if start.tzinfo is None:
+                                start = start.replace(tzinfo=timezone.utc)
+                            elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+                            current_hour = int(elapsed // 3600)
+                            last_milestone = sess.get("last_milestone_hours", 0)
+                            if current_hour > last_milestone and current_hour >= 1:
+                                await update_milestone(guild_id_str, uid, "youtube", current_hour)
+                                nome = data.get("nome", yt_ch)
+                                obs = data.get("observacao") or observacao_padrao
+                                embed = discord.Embed(title=f"⏰ {current_hour}h DE LIVE NO YOUTUBE!", color=0xffaa00)
+                                desc = f"**{nome}** está ao vivo há **{current_hour} horas** consecutivas!"
+                                if obs:
+                                    desc += f"\n{obs}"
+                                embed.description = desc
+                                embed.add_field(name="Título", value=title, inline=False)
+                                embed.add_field(name="Link", value=f"https://youtube.com/watch?v={video_id}", inline=False)
+                                embed.set_footer(text="YouTube • " + datetime.now().strftime("%H:%M"))
+                                await send_to_channels(guild, channel_ids_staff, role_staff_mention, embed)
+                else:
+                    sess = sessions_server.get(uid, {}).get("youtube")
+                    if sess:
+                        start = sess["start_time"]
+                        if start.tzinfo is None:
+                            start = start.replace(tzinfo=timezone.utc)
+                        duration = (datetime.now(timezone.utc) - start).total_seconds()
+                        if duration > 0:
+                            await add_streamer_hours(guild_id_str, uid, duration)
+                        await delete_session(guild_id_str, uid, "youtube")
+                        if uid in sessions_server and "youtube" in sessions_server[uid]:
+                            del sessions_server[uid]["youtube"]
+
+        # ----- KICK -----
+        if plataformas.get("kick"):
+            for uid, data in streamers_dict.items():
+                kick_name = data.get("kick")
+                if not kick_name:
+                    await save_status(guild_id_str, uid, "kick", False)
+                    continue
+                is_live, stream_info = await check_kick_live(kick_name)
+                await save_status(guild_id_str, uid, "kick", is_live)
+                status_server.setdefault(uid, {})["kick"] = is_live
+
+                if is_live:
+                    title = stream_info.get("title", "")
+                    last_key = f"kick_{uid}"
+                    last_status = dados["lives"]["last_notified"].get(last_key)
+
+                    if last_status != "live":
+                        dados["lives"]["last_notified"][last_key] = "live"
+                        await save_last_notified(last_key, "live")
+                        now_utc = datetime.now(timezone.utc)
+                        await save_session(guild_id_str, uid, "kick", now_utc, 0)
+
+                        nome = data.get("nome", kick_name)
+                        obs = data.get("observacao") or observacao_padrao
+                        embed = discord.Embed(title="🔴 LIVE NA KICK", color=0x53fc18)
+                        desc = f"**{nome}** está ao vivo na Kick!"
+                        if obs:
+                            desc += f"\n{obs}"
+                        embed.description = desc
+                        embed.add_field(name="Título", value=title, inline=False)
+                        embed.add_field(name="Espectadores", value=stream_info['viewer_count'], inline=False)
+                        embed.add_field(name="Link", value=f"https://kick.com/{kick_name}", inline=False)
+                        embed.set_footer(text="Kick • " + datetime.now().strftime("%H:%M"))
+                        await send_to_channels(guild, channel_ids_live, role_live_mention, embed)
+                    else:
+                        sess = sessions_server.get(uid, {}).get("kick")
+                        if sess:
+                            start = sess["start_time"]
+                            if start.tzinfo is None:
+                                start = start.replace(tzinfo=timezone.utc)
+                            elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+                            current_hour = int(elapsed // 3600)
+                            last_milestone = sess.get("last_milestone_hours", 0)
+                            if current_hour > last_milestone and current_hour >= 1:
+                                await update_milestone(guild_id_str, uid, "kick", current_hour)
+                                nome = data.get("nome", kick_name)
+                                obs = data.get("observacao") or observacao_padrao
+                                embed = discord.Embed(title=f"⏰ {current_hour}h DE LIVE NA KICK!", color=0xffaa00)
+                                desc = f"**{nome}** está ao vivo há **{current_hour} horas** consecutivas!"
+                                if obs:
+                                    desc += f"\n{obs}"
+                                embed.description = desc
+                                embed.add_field(name="Título", value=title, inline=False)
+                                embed.add_field(name="Link", value=f"https://kick.com/{kick_name}", inline=False)
+                                embed.set_footer(text="Kick • " + datetime.now().strftime("%H:%M"))
+                                await send_to_channels(guild, channel_ids_staff, role_staff_mention, embed)
+                else:
+                    if status_server.get(uid, {}).get("kick", False):
+                        dados["lives"]["last_notified"][f"kick_{uid}"] = "offline"
+                        await save_last_notified(f"kick_{uid}", "offline")
+                    sess = sessions_server.get(uid, {}).get("kick")
+                    if sess:
+                        start = sess["start_time"]
+                        if start.tzinfo is None:
+                            start = start.replace(tzinfo=timezone.utc)
+                        duration = (datetime.now(timezone.utc) - start).total_seconds()
+                        if duration > 0:
+                            await add_streamer_hours(guild_id_str, uid, duration)
+                        await delete_session(guild_id_str, uid, "kick")
+                        if uid in sessions_server and "kick" in sessions_server[uid]:
+                            del sessions_server[uid]["kick"]
+
+        # ----- TIKTOK -----
+        if plataformas.get("tiktok"):
+            for uid, data in streamers_dict.items():
+                tiktok_name = data.get("tiktok")
+                if not tiktok_name:
+                    await save_status(guild_id_str, uid, "tiktok", False)
+                    continue
+                live_info = await check_tiktok_live(tiktok_name)
+                is_live = live_info is not None
+                await save_status(guild_id_str, uid, "tiktok", is_live)
+                status_server.setdefault(uid, {})["tiktok"] = is_live
+
+                if is_live:
+                    title = live_info.get("title", "")
+                    last_key = f"tiktok_{uid}"
+                    last_status = dados["lives"]["last_notified"].get(last_key)
+
+                    if last_status != "live":
+                        dados["lives"]["last_notified"][last_key] = "live"
+                        await save_last_notified(last_key, "live")
+                        now_utc = datetime.now(timezone.utc)
+                        await save_session(guild_id_str, uid, "tiktok", now_utc, 0)
+
+                        nome = data.get("nome", tiktok_name)
+                        obs = data.get("observacao") or observacao_padrao
+                        embed = discord.Embed(title="🔴 LIVE NO TIKTOK", color=0xff0050, url=live_info["url"])
+                        desc = f"**{nome}** está ao vivo no TikTok!"
+                        if obs:
+                            desc += f"\n{obs}"
+                        embed.description = desc
+                        embed.add_field(name="Título", value=title, inline=False)
+                        embed.set_footer(text="TikTok • " + datetime.now().strftime("%H:%M"))
+                        if live_info.get("thumbnail"):
+                            embed.set_image(url=live_info["thumbnail"])
+                        view = View(timeout=None)
+                        view.add_item(Button(label="Assistir Agora", style=discord.ButtonStyle.link, url=live_info["url"]))
+                        await send_to_channels(guild, channel_ids_live, role_live_mention, embed, view=view)
+                    else:
+                        sess = sessions_server.get(uid, {}).get("tiktok")
+                        if sess:
+                            start = sess["start_time"]
+                            if start.tzinfo is None:
+                                start = start.replace(tzinfo=timezone.utc)
+                            elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+                            current_hour = int(elapsed // 3600)
+                            last_milestone = sess.get("last_milestone_hours", 0)
+                            if current_hour > last_milestone and current_hour >= 1:
+                                await update_milestone(guild_id_str, uid, "tiktok", current_hour)
+                                nome = data.get("nome", tiktok_name)
+                                obs = data.get("observacao") or observacao_padrao
+                                embed = discord.Embed(title=f"⏰ {current_hour}h DE LIVE NO TIKTOK!", color=0xffaa00)
+                                desc = f"**{nome}** está ao vivo há **{current_hour} horas** consecutivas!"
+                                if obs:
+                                    desc += f"\n{obs}"
+                                embed.description = desc
+                                embed.add_field(name="Título", value=title, inline=False)
+                                embed.set_footer(text="TikTok • " + datetime.now().strftime("%H:%M"))
+                                view = View(timeout=None)
+                                view.add_item(Button(label="Assistir Agora", style=discord.ButtonStyle.link, url=live_info["url"]))
+                                await send_to_channels(guild, channel_ids_staff, role_staff_mention, embed, view=view)
+                else:
+                    if status_server.get(uid, {}).get("tiktok", False):
+                        dados["lives"]["last_notified"][f"tiktok_{uid}"] = "offline"
+                        await save_last_notified(f"tiktok_{uid}", "offline")
+                    sess = sessions_server.get(uid, {}).get("tiktok")
+                    if sess:
+                        start = sess["start_time"]
+                        if start.tzinfo is None:
+                            start = start.replace(tzinfo=timezone.utc)
+                        duration = (datetime.now(timezone.utc) - start).total_seconds()
+                        if duration > 0:
+                            await add_streamer_hours(guild_id_str, uid, duration)
+                        await delete_session(guild_id_str, uid, "tiktok")
+                        if uid in sessions_server and "tiktok" in sessions_server[uid]:
+                            del sessions_server[uid]["tiktok"]
+
+        # ----- ATUALIZAR PAINEL -----
+        painel_channel_id = config.get("painel_channel_id")
+        if painel_channel_id:
+            painel_channel = guild.get_channel(painel_channel_id)
+            if painel_channel:
+                try:
+                    async for msg in painel_channel.history(limit=10):
+                        if msg.author == bot.user:
+                            view = LiveConfigView(guild.id)
+                            embed = await view.build_embed()
+                            await msg.edit(embed=embed, view=view)
+                            break
+                    else:
+                        view = LiveConfigView(guild.id)
+                        embed = await view.build_embed()
+                        await painel_channel.send(embed=embed, view=view)
+                except Exception as e:
+                    print(f"Erro ao atualizar painel no canal {painel_channel_id}: {e}")
+
+@live_check_loop.before_loop
+async def before_live_check():
+    await bot.wait_until_ready()
+
+# ========= PAINEL DE ADMINISTRAÇÃO (VIEWS) =========
 class LiveConfigView(View):
     def __init__(self, guild_id):
         super().__init__(timeout=None)
@@ -443,43 +876,54 @@ class LiveConfigView(View):
 
     async def get_config(self):
         return dados["lives"]["config"].get(str(self.guild_id), {
-            "channel_ids": [],
-            "role": None,
+            "channel_ids_live": [],
+            "channel_ids_staff": [],
+            "role_live": None,
+            "role_staff": None,
+            "admin_role": None,
             "target_guild": None,
             "platforms": {"twitch": True, "youtube": True, "kick": True, "tiktok": True},
-            "painel_channel_id": None
+            "painel_channel_id": None,
+            "observacao_padrao": ""
         })
 
     async def build_embed(self):
         config = await self.get_config()
-        if config['channel_ids']:
-            canais_txt = "\n".join(f"<#{cid}>" for cid in config['channel_ids'])
-        else:
-            canais_txt = "Não definido"
-        cargo_info = f"<@&{config['role']}>" if config['role'] else "Não definido"
+        live_canais = "\n".join(f"<#{cid}>" for cid in config['channel_ids_live']) or "Não definido"
+        staff_canais = "\n".join(f"<#{cid}>" for cid in config['channel_ids_staff']) or "Não definido"
+        cargo_live = f"<@&{config['role_live']}>" if config['role_live'] else "Não definido"
+        cargo_staff = f"<@&{config['role_staff']}>" if config['role_staff'] else "Não definido"
+        cargo_admin = f"<@&{config['admin_role']}>" if config['admin_role'] else "Administradores do servidor"
         target_info = f"Servidor: {config['target_guild']}" if config.get('target_guild') else "Mesmo servidor"
+        obs_padrao = config.get('observacao_padrao') or "Nenhuma"
+
         plats = config['platforms']
-        embed = discord.Embed(title="🔔 NOTIFICAÇÃO DE LIVES", color=0x99aab5)
-        embed.add_field(name="📢 Canais", value=canais_txt, inline=False)
-        embed.add_field(name="👥 Cargo (ping)", value=cargo_info, inline=False)
-        embed.add_field(name="🎯 Destino", value=target_info, inline=False)
-        status = "\n".join([
-            f"Twitch: {'✅ Ativado' if plats['twitch'] else '❌ Desativado'}",
-            f"YouTube: {'✅ Ativado' if plats['youtube'] else '❌ Desativado'}",
-            f"Kick: {'✅ Ativado' if plats['kick'] else '❌ Desativado'}",
-            f"TikTok: {'✅ Ativado' if plats['tiktok'] else '❌ Desativado'}"
+        status_plats = "\n".join([
+            f"Twitch: {'✅' if plats['twitch'] else '❌'}",
+            f"YouTube: {'✅' if plats['youtube'] else '❌'}",
+            f"Kick: {'✅' if plats['kick'] else '❌'}",
+            f"TikTok: {'✅' if plats['tiktok'] else '❌'}"
         ])
-        embed.add_field(name="🎮 Plataformas Monitoradas", value=status, inline=False)
+
+        embed = discord.Embed(title="🔔 PAINEL DE NOTIFICAÇÕES DE LIVES", color=0x99aab5)
+        embed.add_field(name="📢 Canais de Live (público)", value=live_canais, inline=False)
+        embed.add_field(name="🛡️ Canais de Staff (marcos)", value=staff_canais, inline=False)
+        embed.add_field(name="👥 Cargo para ping (live)", value=cargo_live, inline=False)
+        embed.add_field(name="👥 Cargo para ping (staff)", value=cargo_staff, inline=False)
+        embed.add_field(name="🔑 Cargo Administrador", value=cargo_admin, inline=False)
+        embed.add_field(name="🎯 Servidor Destino", value=target_info, inline=False)
+        embed.add_field(name="📝 Observação padrão", value=obs_padrao, inline=False)
+        embed.add_field(name="🎮 Plataformas", value=status_plats, inline=True)
 
         streamers = dados["lives"]["streamers"].get(str(self.guild_id), {})
         if streamers:
-            lista_streamers = ""
+            lista = ""
             for uid, data in streamers.items():
                 nome = data.get("nome", uid)
                 created_at = data.get("created_at")
                 data_str = format_date(created_at) if created_at else "Data desconhecida"
-                
                 total_sec = dados["lives"]["hours"].get(str(self.guild_id), {}).get(uid, 0)
+                # Adicionar tempo da sessão atual
                 for p in ["twitch", "youtube", "kick", "tiktok"]:
                     sess = dados["lives"]["sessions"].get(str(self.guild_id), {}).get(uid, {}).get(p)
                     if sess:
@@ -489,7 +933,7 @@ class LiveConfigView(View):
                         duration = (datetime.now(timezone.utc) - start).total_seconds()
                         if duration > 0:
                             total_sec += duration
-                horas_formatadas = format_hours(total_sec)
+                horas = format_hours(total_sec)
 
                 plats_list = []
                 for p in ["twitch", "youtube", "kick", "tiktok"]:
@@ -498,39 +942,38 @@ class LiveConfigView(View):
                         emoji = "🟢" if online else "🔴"
                         plats_list.append(f"{emoji} {p.capitalize()}: {data[p]}")
                 if plats_list:
-                    lista_streamers += f"**<@{uid}>** - ⏱️ {horas_formatadas}\n"
-                    lista_streamers += "\n".join(plats_list)
-                    lista_streamers += f"\n📅 Adicionado em: {data_str}\n\n"
-            if lista_streamers:
-                embed.add_field(name="📋 Streamers Cadastrados", value=lista_streamers[:1024], inline=False)
+                    lista += f"**<@{uid}>** - ⏱️ {horas}\n" + "\n".join(plats_list) + f"\n📅 {data_str}\n\n"
+            if lista:
+                embed.add_field(name="📋 Streamers Cadastrados", value=lista[:1024], inline=False)
+
         return embed
 
-    @discord.ui.button(label="📝 Definir Canais", style=discord.ButtonStyle.secondary, emoji="📝")
+    @discord.ui.button(label="📝 Configurar Canais/Cargos", style=discord.ButtonStyle.secondary, emoji="📝")
     async def set_channels(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("Apenas administradores podem definir os canais.", ephemeral=True)
+        if not is_admin(interaction.user, self.guild_id):
+            await interaction.response.send_message("Você não tem permissão para isso.", ephemeral=True)
             return
         modal = SetChannelsModal(self.guild_id, self)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="⚙️ Configuração", style=discord.ButtonStyle.secondary, emoji="⚙️")
-    async def configuracao(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("Apenas administradores podem configurar.", ephemeral=True)
+    @discord.ui.button(label="⚙️ Gerenciar Streamers", style=discord.ButtonStyle.secondary, emoji="⚙️")
+    async def gerenciar(self, interaction: discord.Interaction, button: Button):
+        if not is_admin(interaction.user, self.guild_id):
+            await interaction.response.send_message("Permissão negada.", ephemeral=True)
             return
         await interaction.response.defer()
         view = ConfigStreamersView(self.guild_id, self)
-        embed = discord.Embed(title="⚙️ CONFIGURAÇÃO DE STREAMERS",
-                              description="Gerencie os streamers e plataformas.", color=0x7289da)
+        embed = discord.Embed(title="⚙️ GERENCIAR STREAMERS", color=0x7289da)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     @discord.ui.button(label="➕ Adicionar Streamer", style=discord.ButtonStyle.success, emoji="➕", row=1)
     async def adicionar(self, interaction: discord.Interaction, button: Button):
+        # Permite adicionar se for admin ou o próprio usuário
         await interaction.response.send_modal(AddStreamerByLinkModal(self.guild_id, self))
 
-    @discord.ui.button(label="🔄 Atualizar Painel", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
-    async def atualizar_painel(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction.user):
+    @discord.ui.button(label="🔄 Atualizar", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
+    async def atualizar(self, interaction: discord.Interaction, button: Button):
+        if not is_admin(interaction.user, self.guild_id):
             await interaction.response.send_message("Sem permissão.", ephemeral=True)
             return
         await interaction.response.defer()
@@ -538,10 +981,26 @@ class LiveConfigView(View):
         embed = await self.build_embed()
         await interaction.message.edit(embed=embed, view=self)
 
-class SetChannelsModal(Modal, title="Definir Canais e Cargo"):
-    canais_ids = TextInput(label="IDs dos canais (separados por vírgula)", placeholder="Ex: 123456789,987654321", required=True)
-    cargo_id = TextInput(label="ID do cargo para mencionar", required=True)
-    servidor_id = TextInput(label="ID do servidor de destino (opcional)", required=False, placeholder="Deixe em branco para usar este servidor")
+    @discord.ui.button(label="⏱️ Resetar Horas", style=discord.ButtonStyle.primary, emoji="⏱️", row=1)
+    async def resetar_horas(self, interaction: discord.Interaction, button: Button):
+        if not is_admin(interaction.user, self.guild_id):
+            await interaction.response.send_message("Sem permissão.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        await reset_streamer_hours(str(self.guild_id))
+        await refresh_dados()
+        embed = await self.build_embed()
+        await interaction.message.edit(embed=embed, view=self)
+        await interaction.followup.send("✅ Horas de todos os streamers resetadas.", ephemeral=True)
+
+class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
+    live_canais = TextInput(label="IDs dos canais de LIVE (separados por vírgula)", placeholder="Ex: 123,456", required=True)
+    staff_canais = TextInput(label="IDs dos canais de STAFF (separados por vírgula)", placeholder="Ex: 789,101", required=True)
+    cargo_live = TextInput(label="ID do cargo para ping (live)", required=True)
+    cargo_staff = TextInput(label="ID do cargo para ping (staff)", required=True)
+    cargo_admin = TextInput(label="ID do cargo administrador (opcional)", required=False, placeholder="Deixe em branco para usar admin do servidor")
+    servidor_destino = TextInput(label="ID do servidor destino (opcional)", required=False, placeholder="Deixe em branco para este servidor")
+    obs_padrao = TextInput(label="Observação padrão (opcional)", required=False, placeholder="Mensagem extra em todas as notificações")
 
     def __init__(self, guild_id, parent_view):
         super().__init__()
@@ -551,33 +1010,49 @@ class SetChannelsModal(Modal, title="Definir Canais e Cargo"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            ids_raw = self.canais_ids.value.strip()
-            channel_ids = [int(x.strip()) for x in ids_raw.split(",") if x.strip().isdigit()]
-            if not channel_ids:
-                await interaction.followup.send("Nenhum ID de canal válido informado.", ephemeral=True)
+            live_ids = [int(x.strip()) for x in self.live_canais.value.split(",") if x.strip().isdigit()]
+            staff_ids = [int(x.strip()) for x in self.staff_canais.value.split(",") if x.strip().isdigit()]
+            if not live_ids or not staff_ids:
+                await interaction.followup.send("Canais inválidos.", ephemeral=True)
                 return
-            
-            rid = int(self.cargo_id.value.strip())
-            target_gid = self.servidor_id.value.strip()
-            if target_gid:
-                target_gid = int(target_gid)
-                if not bot.get_guild(target_gid):
-                    await interaction.followup.send("❌ Bot não está presente no servidor informado.", ephemeral=True)
-                    return
-            else:
-                target_gid = None
 
-            config = dados["lives"]["config"].setdefault(str(self.guild_id),
-                                                         {"platforms": {"twitch": True, "youtube": True, "kick": True, "tiktok": True}})
-            config["channel_ids"] = channel_ids
-            config["role"] = rid
+            role_live = int(self.cargo_live.value.strip())
+            role_staff = int(self.cargo_staff.value.strip())
+            admin_role = int(self.cargo_admin.value.strip()) if self.cargo_admin.value.strip() else None
+            target_gid = int(self.servidor_destino.value.strip()) if self.servidor_destino.value.strip() else None
+            obs = self.obs_padrao.value.strip()
+
+            if target_gid and not bot.get_guild(target_gid):
+                await interaction.followup.send("❌ Bot não está no servidor destino.", ephemeral=True)
+                return
+
+            config = dados["lives"]["config"].setdefault(str(self.guild_id), {})
+            config["channel_ids_live"] = live_ids
+            config["channel_ids_staff"] = staff_ids
+            config["role_live"] = role_live
+            config["role_staff"] = role_staff
+            config["admin_role"] = admin_role
             config["target_guild"] = target_gid
+            config["observacao_padrao"] = obs
+            if "platforms" not in config:
+                config["platforms"] = {"twitch": True, "youtube": True, "kick": True, "tiktok": True}
 
-            await save_config(str(self.guild_id), target_gid, channel_ids, rid, config["platforms"], config.get("painel_channel_id"))
+            await save_config(
+                str(self.guild_id),
+                target_gid,
+                live_ids,
+                staff_ids,
+                role_live,
+                role_staff,
+                admin_role,
+                config["platforms"],
+                config.get("painel_channel_id"),
+                obs
+            )
             await refresh_dados()
             embed = await self.parent_view.build_embed()
             await interaction.message.edit(embed=embed, view=self.parent_view)
-            await interaction.followup.send("✅ Configuração salva! As notificações serão enviadas para os canais configurados.", ephemeral=True)
+            await interaction.followup.send("✅ Configuração salva!", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"Erro: {e}", ephemeral=True)
 
@@ -587,14 +1062,14 @@ class ConfigStreamersView(View):
         self.guild_id = guild_id
         self.parent_view = parent_view
 
-    @discord.ui.button(label="➕ Adicionar Streamer", style=discord.ButtonStyle.success, emoji="➕", row=0)
+    @discord.ui.button(label="➕ Adicionar", style=discord.ButtonStyle.success, emoji="➕")
     async def add(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_modal(AddStreamerByLinkModal(self.guild_id, self.parent_view))
 
-    @discord.ui.button(label="🗑️ Remover Streamer", style=discord.ButtonStyle.danger, emoji="🗑️", row=0)
+    @discord.ui.button(label="🗑️ Remover", style=discord.ButtonStyle.danger, emoji="🗑️")
     async def remove(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("Apenas administradores podem remover streamers.", ephemeral=True)
+        if not is_admin(interaction.user, self.guild_id):
+            await interaction.response.send_message("Permissão negada.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         streamers = dados["lives"]["streamers"].get(str(self.guild_id), {})
@@ -604,60 +1079,63 @@ class ConfigStreamersView(View):
         view = RemoveStreamerSelectView(self.guild_id, self.parent_view)
         await interaction.followup.send("Selecione o streamer para remover:", view=view, ephemeral=True)
 
-    @discord.ui.button(label="⏱️ Resetar Horas", style=discord.ButtonStyle.primary, emoji="⏱️", row=0)
-    async def reset_hours(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("Apenas administradores podem resetar horas.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        view = ResetHoursSelectView(self.guild_id, self.parent_view)
-        await interaction.followup.send("Selecione de quem você quer zerar as horas:", view=view, ephemeral=True)
-
     @discord.ui.button(label="📺 Twitch", style=discord.ButtonStyle.secondary, emoji="📺", row=1)
     async def toggle_twitch(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("Sem permissão.", ephemeral=True)
+        if not is_admin(interaction.user, self.guild_id):
+            await interaction.response.send_message("Permissão negada.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        config = dados["lives"]["config"].setdefault(str(self.guild_id), {"platforms": {"twitch": True}})
+        config = dados["lives"]["config"].setdefault(str(self.guild_id), {})
         config["platforms"]["twitch"] = not config["platforms"].get("twitch", True)
-        await save_config(str(self.guild_id), config.get("target_guild"), config.get("channel_ids", []), config.get("role"), config["platforms"], config.get("painel_channel_id"))
+        await save_config(str(self.guild_id), config.get("target_guild"), config.get("channel_ids_live", []),
+                          config.get("channel_ids_staff", []), config.get("role_live"), config.get("role_staff"),
+                          config.get("admin_role"), config["platforms"], config.get("painel_channel_id"),
+                          config.get("observacao_padrao", ""))
         await refresh_dados()
         await interaction.followup.send(f"Twitch {'ativado' if config['platforms']['twitch'] else 'desativado'}.", ephemeral=True)
 
     @discord.ui.button(label="▶️ YouTube", style=discord.ButtonStyle.danger, emoji="▶️", row=1)
     async def toggle_youtube(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("Sem permissão.", ephemeral=True)
+        if not is_admin(interaction.user, self.guild_id):
+            await interaction.response.send_message("Permissão negada.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        config = dados["lives"]["config"].setdefault(str(self.guild_id), {"platforms": {"youtube": True}})
+        config = dados["lives"]["config"].setdefault(str(self.guild_id), {})
         config["platforms"]["youtube"] = not config["platforms"].get("youtube", True)
-        await save_config(str(self.guild_id), config.get("target_guild"), config.get("channel_ids", []), config.get("role"), config["platforms"], config.get("painel_channel_id"))
+        await save_config(str(self.guild_id), config.get("target_guild"), config.get("channel_ids_live", []),
+                          config.get("channel_ids_staff", []), config.get("role_live"), config.get("role_staff"),
+                          config.get("admin_role"), config["platforms"], config.get("painel_channel_id"),
+                          config.get("observacao_padrao", ""))
         await refresh_dados()
         await interaction.followup.send(f"YouTube {'ativado' if config['platforms']['youtube'] else 'desativado'}.", ephemeral=True)
 
     @discord.ui.button(label="🟢 Kick", style=discord.ButtonStyle.success, emoji="🟢", row=1)
     async def toggle_kick(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("Sem permissão.", ephemeral=True)
+        if not is_admin(interaction.user, self.guild_id):
+            await interaction.response.send_message("Permissão negada.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        config = dados["lives"]["config"].setdefault(str(self.guild_id), {"platforms": {"kick": True}})
+        config = dados["lives"]["config"].setdefault(str(self.guild_id), {})
         config["platforms"]["kick"] = not config["platforms"].get("kick", True)
-        await save_config(str(self.guild_id), config.get("target_guild"), config.get("channel_ids", []), config.get("role"), config["platforms"], config.get("painel_channel_id"))
+        await save_config(str(self.guild_id), config.get("target_guild"), config.get("channel_ids_live", []),
+                          config.get("channel_ids_staff", []), config.get("role_live"), config.get("role_staff"),
+                          config.get("admin_role"), config["platforms"], config.get("painel_channel_id"),
+                          config.get("observacao_padrao", ""))
         await refresh_dados()
         await interaction.followup.send(f"Kick {'ativado' if config['platforms']['kick'] else 'desativado'}.", ephemeral=True)
 
     @discord.ui.button(label="🎵 TikTok", style=discord.ButtonStyle.secondary, emoji="🎵", row=1)
     async def toggle_tiktok(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("Sem permissão.", ephemeral=True)
+        if not is_admin(interaction.user, self.guild_id):
+            await interaction.response.send_message("Permissão negada.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        config = dados["lives"]["config"].setdefault(str(self.guild_id), {"platforms": {"tiktok": True}})
+        config = dados["lives"]["config"].setdefault(str(self.guild_id), {})
         config["platforms"]["tiktok"] = not config["platforms"].get("tiktok", True)
-        await save_config(str(self.guild_id), config.get("target_guild"), config.get("channel_ids", []), config.get("role"), config["platforms"], config.get("painel_channel_id"))
+        await save_config(str(self.guild_id), config.get("target_guild"), config.get("channel_ids_live", []),
+                          config.get("channel_ids_staff", []), config.get("role_live"), config.get("role_staff"),
+                          config.get("admin_role"), config["platforms"], config.get("painel_channel_id"),
+                          config.get("observacao_padrao", ""))
         await refresh_dados()
         await interaction.followup.send(f"TikTok {'ativado' if config['platforms']['tiktok'] else 'desativado'}.", ephemeral=True)
 
@@ -702,49 +1180,11 @@ class StreamerRemoveDropdown(Select):
         except:
             pass
 
-class ResetHoursSelectView(View):
-    def __init__(self, guild_id, parent_view):
-        super().__init__(timeout=120)
-        self.guild_id = guild_id
-        self.parent_view = parent_view
-        streamers = dados["lives"]["streamers"].get(str(guild_id), {})
-        options = [discord.SelectOption(label="⚠️ ZERAR TODOS OS STREAMERS", value="ALL", emoji="☢️")]
-        for uid, data in streamers.items():
-            nome = data.get("nome", uid)
-            options.append(discord.SelectOption(label=nome[:100], value=uid))
-        if len(options) > 25:
-            options = options[:25]
-        if options:
-            self.add_item(ResetHoursDropdown(options, guild_id, parent_view))
-
-class ResetHoursDropdown(Select):
-    def __init__(self, options, guild_id, parent_view):
-        super().__init__(placeholder="Escolha de quem zerar as horas...", options=options)
-        self.guild_id = guild_id
-        self.parent_view = parent_view
-
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        uid = self.values[0]
-        if uid == "ALL":
-            await reset_streamer_hours(str(self.guild_id))
-            mensagem = "As horas de **TODOS** os streamers foram zeradas com sucesso!"
-        else:
-            await reset_streamer_hours(str(self.guild_id), uid)
-            mensagem = "As horas do streamer foram zeradas com sucesso!"
-        await refresh_dados()
-        await interaction.followup.send(mensagem, ephemeral=True)
-        try:
-            embed = await self.parent_view.build_embed()
-            await interaction.message.edit(embed=embed, view=self.parent_view)
-        except:
-            pass
-
 class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
     plataforma = TextInput(label="PLATAFORMA (twitch/youtube/kick/tiktok)", placeholder="Ex: twitch", required=True)
-    username = TextInput(label="USERNAME OU LINK DO STREAMER", placeholder="Ex: alanzoka ou https://twitch.tv/alanzoka", required=True)
-    discord_user = TextInput(label="DISCORD DO STREAMER (opcional)", placeholder="ID ou @ do usuário", required=False)
-    observacao = TextInput(label="OBSERVAÇÃO (mensagem padrão)", placeholder="Aparecerá na notificação da live", required=False)
+    username = TextInput(label="USERNAME OU LINK", placeholder="Ex: alanzoka ou https://twitch.tv/alanzoka", required=True)
+    discord_user = TextInput(label="DISCORD DO STREAMER (opcional)", placeholder="ID ou @", required=False)
+    observacao = TextInput(label="OBSERVAÇÃO (opcional)", placeholder="Mensagem personalizada", required=False)
 
     def __init__(self, guild_id, parent_view):
         super().__init__()
@@ -781,7 +1221,8 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
             except:
                 pass
 
-        if not is_admin(interaction.user) and uid != str(interaction.user.id):
+        # Se não for admin, só pode adicionar a si mesmo
+        if not is_admin(interaction.user, self.guild_id) and uid != str(interaction.user.id):
             await interaction.followup.send("Você só pode adicionar seu próprio canal.", ephemeral=True)
             return
 
@@ -797,6 +1238,10 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
             observacao=obs or current.get("observacao", "")
         )
         await refresh_dados()
+
+        # Verificar se já está em live e notificar imediatamente
+        await check_streamer_now(guild_str, uid, interaction.guild)
+
         await interaction.followup.send(f"Streamer **{nome_streamer}** adicionado em **{platform}**!", ephemeral=True)
         try:
             embed = await self.parent_view.build_embed()
@@ -804,375 +1249,172 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
         except:
             pass
 
-# ============================================================
-# TASK DE VERIFICAÇÃO DE LIVES (precisa ser definida antes do bot?)
-# Na verdade, a task usa o bot, então deve ser definida depois.
-# Mas como a task usa 'bot' apenas no loop, podemos defini-la depois.
-# ============================================================
+# ========= FUNÇÃO PARA VERIFICAR STREAMER RECÉM-ADICIONADO =========
+async def check_streamer_now(guild_id_str, uid, guild):
+    """Verifica se o streamer está ao vivo e envia notificação imediatamente."""
+    config = dados["lives"]["config"].get(guild_id_str, {})
+    streamer_data = dados["lives"]["streamers"].get(guild_id_str, {}).get(uid)
+    if not streamer_data:
+        return
 
-@tasks.loop(minutes=1)
-async def live_check_loop():
-    global dados
+    plataformas = config.get("platforms", {})
+    channel_ids_live = config.get("channel_ids_live", [])
+    role_live_id = config.get("role_live")
+    role_mention = f"<@&{role_live_id}>" if role_live_id and guild.get_role(role_live_id) else ""
+    observacao_padrao = config.get("observacao_padrao", "")
+
+    # Twitch
+    if plataformas.get("twitch") and streamer_data.get("twitch"):
+        twitch_name = streamer_data["twitch"]
+        lives = await check_twitch_lives([twitch_name])
+        if twitch_name.lower() in lives:
+            live_info = lives[twitch_name.lower()]
+            title = live_info.get("title", "")
+            nome = streamer_data.get("nome", twitch_name)
+            obs = streamer_data.get("observacao") or observacao_padrao
+            embed = discord.Embed(title="🔴 LIVE NA TWITCH", color=0x9146ff)
+            desc = f"**{nome}** está ao vivo na Twitch!"
+            if obs:
+                desc += f"\n{obs}"
+            embed.description = desc
+            embed.add_field(name="Título", value=title, inline=False)
+            embed.add_field(name="Link", value=f"https://twitch.tv/{twitch_name}", inline=False)
+            if 'thumbnail_url' in live_info:
+                thumb_url = live_info['thumbnail_url'].replace('{width}', '640').replace('{height}', '360')
+                embed.set_image(url=thumb_url)
+            embed.set_footer(text="Twitch • " + datetime.now().strftime("%H:%M"))
+            await send_to_channels(guild, channel_ids_live, role_mention, embed)
+
+    # YouTube
+    if plataformas.get("youtube") and streamer_data.get("youtube"):
+        yt_ch = streamer_data["youtube"]
+        lives = await check_youtube_lives([yt_ch])
+        if yt_ch in lives:
+            video = lives[yt_ch]
+            title = video['snippet']['title']
+            video_id = video["id"]["videoId"]
+            nome = streamer_data.get("nome", yt_ch)
+            obs = streamer_data.get("observacao") or observacao_padrao
+            embed = discord.Embed(title="🔴 LIVE NO YOUTUBE", color=0xff0000)
+            desc = f"**{nome}** está ao vivo no YouTube!"
+            if obs:
+                desc += f"\n{obs}"
+            embed.description = desc
+            embed.add_field(name="Título", value=title, inline=False)
+            embed.add_field(name="Link", value=f"https://youtube.com/watch?v={video_id}", inline=False)
+            embed.set_footer(text="YouTube • " + datetime.now().strftime("%H:%M"))
+            await send_to_channels(guild, channel_ids_live, role_mention, embed)
+
+    # Kick
+    if plataformas.get("kick") and streamer_data.get("kick"):
+        kick_name = streamer_data["kick"]
+        is_live, stream_info = await check_kick_live(kick_name)
+        if is_live:
+            title = stream_info.get("title", "")
+            nome = streamer_data.get("nome", kick_name)
+            obs = streamer_data.get("observacao") or observacao_padrao
+            embed = discord.Embed(title="🔴 LIVE NA KICK", color=0x53fc18)
+            desc = f"**{nome}** está ao vivo na Kick!"
+            if obs:
+                desc += f"\n{obs}"
+            embed.description = desc
+            embed.add_field(name="Título", value=title, inline=False)
+            embed.add_field(name="Espectadores", value=stream_info['viewer_count'], inline=False)
+            embed.add_field(name="Link", value=f"https://kick.com/{kick_name}", inline=False)
+            embed.set_footer(text="Kick • " + datetime.now().strftime("%H:%M"))
+            await send_to_channels(guild, channel_ids_live, role_mention, embed)
+
+    # TikTok
+    if plataformas.get("tiktok") and streamer_data.get("tiktok"):
+        tiktok_name = streamer_data["tiktok"]
+        live_info = await check_tiktok_live(tiktok_name)
+        if live_info:
+            title = live_info.get("title", "")
+            nome = streamer_data.get("nome", tiktok_name)
+            obs = streamer_data.get("observacao") or observacao_padrao
+            embed = discord.Embed(title="🔴 LIVE NO TIKTOK", color=0xff0050, url=live_info["url"])
+            desc = f"**{nome}** está ao vivo no TikTok!"
+            if obs:
+                desc += f"\n{obs}"
+            embed.description = desc
+            embed.add_field(name="Título", value=title, inline=False)
+            embed.set_footer(text="TikTok • " + datetime.now().strftime("%H:%M"))
+            if live_info.get("thumbnail"):
+                embed.set_image(url=live_info["thumbnail"])
+            view = View(timeout=None)
+            view.add_item(Button(label="Assistir Agora", style=discord.ButtonStyle.link, url=live_info["url"]))
+            await send_to_channels(guild, channel_ids_live, role_mention, embed, view=view)
+
+# ========= COMANDOS DE TEXTO =========
+@bot.command(name="painel_lives")
+async def cmd_painel_lives(ctx):
+    """Exibe o painel de administração (restrito a administradores ou cargo configurado)."""
+    if not is_admin(ctx.author, ctx.guild.id):
+        await ctx.send("❌ Você não tem permissão para usar este comando.", delete_after=5)
+        return
+    view = LiveConfigView(ctx.guild.id)
+    embed = await view.build_embed()
+    await ctx.send(embed=embed, view=view)
+
+@bot.command(name="live_status")
+async def cmd_live_status(ctx):
+    """Mostra o status atual de todos os streamers (público)."""
+    guild_id = str(ctx.guild.id)
+    streamers = dados["lives"]["streamers"].get(guild_id, {})
+    if not streamers:
+        await ctx.send("Nenhum streamer cadastrado.")
+        return
+
+    embed = discord.Embed(title="📡 STATUS DOS STREAMERS", color=0x00ff00)
+    for uid, data in streamers.items():
+        nome = data.get("nome", uid)
+        status_list = []
+        for p in ["twitch", "youtube", "kick", "tiktok"]:
+            if data.get(p):
+                online = dados["lives"]["status"].get(guild_id, {}).get(uid, {}).get(p, False)
+                emoji = "🟢" if online else "🔴"
+                status_list.append(f"{emoji} {p.capitalize()}")
+        if status_list:
+            embed.add_field(name=nome, value=" ".join(status_list), inline=False)
+    await ctx.send(embed=embed)
+
+@bot.command(name="refresh_lives")
+async def cmd_refresh_lives(ctx):
+    """Atualiza a lista de streamers e status (administradores)."""
+    if not is_admin(ctx.author, ctx.guild.id):
+        await ctx.send("❌ Sem permissão.", delete_after=5)
+        return
     await refresh_dados()
-    for guild_id_str in dados["lives"]["config"]:
-        config = dados["lives"]["config"][guild_id_str]
-        
-        target_guild_id = config.get("target_guild")
-        if target_guild_id:
-            guild = bot.get_guild(target_guild_id)
-        else:
-            guild = bot.get_guild(int(guild_id_str))
-        
-        if not guild:
-            continue
-        
-        plataformas = config.get("platforms", {"twitch": True, "youtube": True, "kick": True, "tiktok": True})
-        channel_ids = config.get("channel_ids", [])
-        role_id = config.get("role")
-        role_mention = f"<@&{role_id}>" if role_id and guild.get_role(role_id) else ""
-        
-        streamers_dict = dados["lives"]["streamers"].get(guild_id_str, {})
-        status_server = dados["lives"]["status"].setdefault(guild_id_str, {})
-        sessions_server = dados["lives"]["sessions"].setdefault(guild_id_str, {})
+    await ctx.send("✅ Dados atualizados!")
 
-        # Twitch
-        if plataformas.get("twitch"):
-            twitch_users = [data.get("twitch") for data in streamers_dict.values() if data.get("twitch")]
-            lives = await check_twitch_lives(twitch_users)
-            for uid, data in streamers_dict.items():
-                twitch_name = data.get("twitch")
-                if not twitch_name:
-                    await save_status(guild_id_str, uid, "twitch", False)
-                    continue
-                
-                is_live = twitch_name.lower() in lives
-                await save_status(guild_id_str, uid, "twitch", is_live)
-                status_server.setdefault(uid, {})["twitch"] = is_live
-                
-                if is_live:
-                    live_info = lives[twitch_name.lower()]
-                    title = live_info.get("title", "")
-                    last_key = f"twitch_{uid}"
-                    last_id = dados["lives"]["last_notified"].get(last_key)
-                    stream_id = live_info["id"]
-                    
-                    if last_id != stream_id:
-                        dados["lives"]["last_notified"][last_key] = stream_id
-                        await save_last_notified(last_key, stream_id)
-                        now_utc = datetime.now(timezone.utc)
-                        await save_session(guild_id_str, uid, "twitch", now_utc, False)
-                        
-                        nome_streamer = data.get("nome", twitch_name)
-                        observacao = data.get("observacao", "")
-                        embed = discord.Embed(title="🔴 LIVE NA TWITCH", color=0x9146ff)
-                        desc = f"**{nome_streamer}** está ao vivo na Twitch!"
-                        if observacao:
-                            desc += f"\n{observacao}"
-                        embed.description = desc
-                        embed.add_field(name="Título", value=title, inline=False)
-                        embed.add_field(name="Link", value=f"https://twitch.tv/{twitch_name}", inline=False)
-                        if 'thumbnail_url' in live_info:
-                            thumb_url = live_info['thumbnail_url'].replace('{width}', '640').replace('{height}', '360')
-                            embed.set_image(url=thumb_url)
-                        await send_to_all_channels(guild, channel_ids, role_mention, embed)
-                    else:
-                        sess = sessions_server.get(uid, {}).get("twitch")
-                        if sess and not sess.get("three_hour_notified"):
-                            start = sess["start_time"]
-                            if start.tzinfo is None: start = start.replace(tzinfo=timezone.utc)
-                            elapsed = (datetime.now(timezone.utc) - start).total_seconds()
-                            if elapsed >= 3 * 3600:
-                                await save_session(guild_id_str, uid, "twitch", start, True)
-                                nome_streamer = data.get("nome", twitch_name)
-                                observacao = data.get("observacao", "")
-                                embed = discord.Embed(title="⏰ AINDA AO VIVO (3+ HORAS)", color=0xffaa00)
-                                desc = f"**{nome_streamer}** continua ao vivo na Twitch após mais de 3 horas!"
-                                if observacao:
-                                    desc += f"\n{observacao}"
-                                embed.description = desc
-                                embed.add_field(name="Título", value=title, inline=False)
-                                embed.add_field(name="Link", value=f"https://twitch.tv/{twitch_name}", inline=False)
-                                await send_to_all_channels(guild, channel_ids, role_mention, embed)
-                else:
-                    sess = sessions_server.get(uid, {}).get("twitch")
-                    if sess:
-                        start = sess["start_time"]
-                        if start.tzinfo is None: start = start.replace(tzinfo=timezone.utc)
-                        duration = (datetime.now(timezone.utc) - start).total_seconds()
-                        if duration > 0:
-                            await add_streamer_hours(guild_id_str, uid, duration)
-                        await delete_session(guild_id_str, uid, "twitch")
-                        if uid in sessions_server and "twitch" in sessions_server[uid]:
-                            del sessions_server[uid]["twitch"]
-
-        # YouTube
-        if plataformas.get("youtube"):
-            yt_users = [data.get("youtube") for data in streamers_dict.values() if data.get("youtube")]
-            lives = await check_youtube_lives(yt_users)
-            for uid, data in streamers_dict.items():
-                yt_ch = data.get("youtube")
-                if not yt_ch:
-                    await save_status(guild_id_str, uid, "youtube", False)
-                    continue
-                
-                is_live = yt_ch in lives
-                await save_status(guild_id_str, uid, "youtube", is_live)
-                status_server.setdefault(uid, {})["youtube"] = is_live
-                
-                if is_live:
-                    video = lives[yt_ch]
-                    title = video['snippet']['title']
-                    last_key = f"yt_{uid}"
-                    video_id = video["id"]["videoId"]
-                    last_id = dados["lives"]["last_notified"].get(last_key)
-                    
-                    if last_id != video_id:
-                        dados["lives"]["last_notified"][last_key] = video_id
-                        await save_last_notified(last_key, video_id)
-                        now_utc = datetime.now(timezone.utc)
-                        await save_session(guild_id_str, uid, "youtube", now_utc, False)
-                        
-                        nome_streamer = data.get("nome", yt_ch)
-                        observacao = data.get("observacao", "")
-                        embed = discord.Embed(title="🔴 LIVE NO YOUTUBE", color=0xff0000)
-                        desc = f"**{nome_streamer}** está ao vivo no YouTube!"
-                        if observacao:
-                            desc += f"\n{observacao}"
-                        embed.description = desc
-                        embed.add_field(name="Título", value=title, inline=False)
-                        embed.add_field(name="Link", value=f"https://youtube.com/watch?v={video_id}", inline=False)
-                        await send_to_all_channels(guild, channel_ids, role_mention, embed)
-                    else:
-                        sess = sessions_server.get(uid, {}).get("youtube")
-                        if sess and not sess.get("three_hour_notified"):
-                            start = sess["start_time"]
-                            if start.tzinfo is None: start = start.replace(tzinfo=timezone.utc)
-                            if (datetime.now(timezone.utc) - start).total_seconds() >= 3 * 3600:
-                                await save_session(guild_id_str, uid, "youtube", start, True)
-                                nome_streamer = data.get("nome", yt_ch)
-                                observacao = data.get("observacao", "")
-                                embed = discord.Embed(title="⏰ AINDA AO VIVO (3+ HORAS)", color=0xffaa00)
-                                desc = f"**{nome_streamer}** continua ao vivo no YouTube após mais de 3 horas!"
-                                if observacao:
-                                    desc += f"\n{observacao}"
-                                embed.description = desc
-                                embed.add_field(name="Título", value=title, inline=False)
-                                embed.add_field(name="Link", value=f"https://youtube.com/watch?v={video_id}", inline=False)
-                                await send_to_all_channels(guild, channel_ids, role_mention, embed)
-                else:
-                    sess = sessions_server.get(uid, {}).get("youtube")
-                    if sess:
-                        start = sess["start_time"]
-                        if start.tzinfo is None: start = start.replace(tzinfo=timezone.utc)
-                        duration = (datetime.now(timezone.utc) - start).total_seconds()
-                        if duration > 0:
-                            await add_streamer_hours(guild_id_str, uid, duration)
-                        await delete_session(guild_id_str, uid, "youtube")
-                        if uid in sessions_server and "youtube" in sessions_server[uid]:
-                            del sessions_server[uid]["youtube"]
-
-        # Kick
-        if plataformas.get("kick"):
-            for uid, data in streamers_dict.items():
-                kick_name = data.get("kick")
-                if not kick_name:
-                    await save_status(guild_id_str, uid, "kick", False)
-                    continue
-                
-                is_live, stream_info = await check_kick_live(kick_name)
-                await save_status(guild_id_str, uid, "kick", is_live)
-                status_server.setdefault(uid, {})["kick"] = is_live
-                
-                if is_live:
-                    title = stream_info.get("title", "")
-                    last_key = f"kick_{uid}"
-                    last_status = dados["lives"]["last_notified"].get(last_key)
-                    
-                    if last_status != "live":
-                        dados["lives"]["last_notified"][last_key] = "live"
-                        await save_last_notified(last_key, "live")
-                        now_utc = datetime.now(timezone.utc)
-                        await save_session(guild_id_str, uid, "kick", now_utc, False)
-                        
-                        nome_streamer = data.get("nome", kick_name)
-                        observacao = data.get("observacao", "")
-                        embed = discord.Embed(title="🔴 LIVE NA KICK", color=0x53fc18)
-                        desc = f"**{nome_streamer}** está ao vivo na Kick!"
-                        if observacao:
-                            desc += f"\n{observacao}"
-                        embed.description = desc
-                        embed.add_field(name="Título", value=title, inline=False)
-                        embed.add_field(name="Espectadores", value=stream_info['viewer_count'], inline=False)
-                        embed.add_field(name="Link", value=f"https://kick.com/{kick_name}", inline=False)
-                        await send_to_all_channels(guild, channel_ids, role_mention, embed)
-                    else:
-                        sess = sessions_server.get(uid, {}).get("kick")
-                        if sess and not sess.get("three_hour_notified"):
-                            start = sess["start_time"]
-                            if start.tzinfo is None: start = start.replace(tzinfo=timezone.utc)
-                            if (datetime.now(timezone.utc) - start).total_seconds() >= 3 * 3600:
-                                await save_session(guild_id_str, uid, "kick", start, True)
-                                nome_streamer = data.get("nome", kick_name)
-                                observacao = data.get("observacao", "")
-                                embed = discord.Embed(title="⏰ AINDA AO VIVO (3+ HORAS)", color=0xffaa00)
-                                desc = f"**{nome_streamer}** continua ao vivo na Kick após mais de 3 horas!"
-                                if observacao:
-                                    desc += f"\n{observacao}"
-                                embed.description = desc
-                                embed.add_field(name="Título", value=title, inline=False)
-                                embed.add_field(name="Link", value=f"https://kick.com/{kick_name}", inline=False)
-                                await send_to_all_channels(guild, channel_ids, role_mention, embed)
-                else:
-                    if status_server.get(uid, {}).get("kick", False):
-                        dados["lives"]["last_notified"][f"kick_{uid}"] = "offline"
-                        await save_last_notified(f"kick_{uid}", "offline")
-                    
-                    sess = sessions_server.get(uid, {}).get("kick")
-                    if sess:
-                        start = sess["start_time"]
-                        if start.tzinfo is None: start = start.replace(tzinfo=timezone.utc)
-                        duration = (datetime.now(timezone.utc) - start).total_seconds()
-                        if duration > 0:
-                            await add_streamer_hours(guild_id_str, uid, duration)
-                        await delete_session(guild_id_str, uid, "kick")
-                        if uid in sessions_server and "kick" in sessions_server[uid]:
-                            del sessions_server[uid]["kick"]
-
-        # TikTok
-        if plataformas.get("tiktok"):
-            for uid, data in streamers_dict.items():
-                tiktok_name = data.get("tiktok")
-                if not tiktok_name:
-                    await save_status(guild_id_str, uid, "tiktok", False)
-                    continue
-                
-                live_info = await check_tiktok_live(tiktok_name)
-                is_live = live_info is not None
-                await save_status(guild_id_str, uid, "tiktok", is_live)
-                status_server.setdefault(uid, {})["tiktok"] = is_live
-                
-                if is_live:
-                    title = live_info.get("title", "")
-                    last_key = f"tiktok_{uid}"
-                    last_status = dados["lives"]["last_notified"].get(last_key)
-                    
-                    if last_status != "live":
-                        dados["lives"]["last_notified"][last_key] = "live"
-                        await save_last_notified(last_key, "live")
-                        now_utc = datetime.now(timezone.utc)
-                        await save_session(guild_id_str, uid, "tiktok", now_utc, False)
-                        
-                        nome_streamer = data.get("nome", tiktok_name)
-                        observacao = data.get("observacao", "")
-                        embed = discord.Embed(title="🔴 LIVE NO TIKTOK", description=f"**{nome_streamer}** está ao vivo no TikTok!", color=0xff0050, url=live_info["url"])
-                        if observacao:
-                            embed.description += f"\n{observacao}"
-                        embed.add_field(name="Título", value=title, inline=False)
-                        embed.set_footer(text="TikTok • " + datetime.now().strftime("%H:%M"))
-                        if live_info.get("thumbnail"):
-                            embed.set_image(url=live_info["thumbnail"])
-                        view = View(timeout=None)
-                        view.add_item(Button(label="Assistir Agora", style=discord.ButtonStyle.link, url=live_info["url"]))
-                        await send_to_all_channels(guild, channel_ids, role_mention, embed, view=view)
-                    else:
-                        sess = sessions_server.get(uid, {}).get("tiktok")
-                        if sess and not sess.get("three_hour_notified"):
-                            start = sess["start_time"]
-                            if start.tzinfo is None: start = start.replace(tzinfo=timezone.utc)
-                            if (datetime.now(timezone.utc) - start).total_seconds() >= 3 * 3600:
-                                await save_session(guild_id_str, uid, "tiktok", start, True)
-                                nome_streamer = data.get("nome", tiktok_name)
-                                observacao = data.get("observacao", "")
-                                embed = discord.Embed(title="⏰ AINDA AO VIVO (3+ HORAS)", color=0xffaa00)
-                                desc = f"**{nome_streamer}** continua ao vivo no TikTok após mais de 3 horas!"
-                                if observacao:
-                                    desc += f"\n{observacao}"
-                                embed.description = desc
-                                embed.add_field(name="Título", value=title, inline=False)
-                                embed.set_footer(text="TikTok • " + datetime.now().strftime("%H:%M"))
-                                view = View(timeout=None)
-                                view.add_item(Button(label="Assistir Agora", style=discord.ButtonStyle.link, url=live_info["url"]))
-                                await send_to_all_channels(guild, channel_ids, role_mention, embed, view=view)
-                else:
-                    if status_server.get(uid, {}).get("tiktok", False):
-                        dados["lives"]["last_notified"][f"tiktok_{uid}"] = "offline"
-                        await save_last_notified(f"tiktok_{uid}", "offline")
-                    
-                    sess = sessions_server.get(uid, {}).get("tiktok")
-                    if sess:
-                        start = sess["start_time"]
-                        if start.tzinfo is None: start = start.replace(tzinfo=timezone.utc)
-                        duration = (datetime.now(timezone.utc) - start).total_seconds()
-                        if duration > 0:
-                            await add_streamer_hours(guild_id_str, uid, duration)
-                        await delete_session(guild_id_str, uid, "tiktok")
-                        if uid in sessions_server and "tiktok" in sessions_server[uid]:
-                            del sessions_server[uid]["tiktok"]
-
-        # Atualizar painel
-        painel_channel_id = config.get("painel_channel_id")
-        if painel_channel_id:
-            painel_channel = guild.get_channel(painel_channel_id)
-            if painel_channel:
-                try:
-                    async for msg in painel_channel.history(limit=10):
-                        if msg.author == bot.user:
-                            view = LiveConfigView(guild.id)
-                            embed = await view.build_embed()
-                            await msg.edit(embed=embed, view=view)
-                            break
-                    else:
-                        view = LiveConfigView(guild.id)
-                        embed = await view.build_embed()
-                        await painel_channel.send(embed=embed, view=view)
-                except Exception as e:
-                    print(f"Erro ao atualizar painel no canal {painel_channel_id}: {e}")
-
-async def send_to_all_channels(guild, channel_ids, role_mention, embed, view=None):
-    for cid in channel_ids:
-        canal = guild.get_channel(cid)
-        if canal:
-            try:
-                if view:
-                    await canal.send(content=role_mention, embed=embed, view=view)
-                else:
-                    await canal.send(content=role_mention, embed=embed)
-            except Exception as e:
-                print(f"Erro ao enviar notificação para {canal.id}: {e}")
-
-# ============================================================
-# CRIAÇÃO DO BOT E COMANDOS
-# ============================================================
-
-bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
-
-# ---- COMANDO SLASH ----
-@bot.tree.command(name="setpainel", description="Define o canal onde o painel de lives será exibido e atualizado.")
+# ========= COMANDO SLASH =========
+@bot.tree.command(name="setpainel", description="Define o canal onde o painel de lives será exibido.")
 @app_commands.default_permissions(administrator=True)
 async def setpainel(interaction: discord.Interaction, canal: discord.TextChannel):
-    """Comando para definir o canal do painel."""
-    try:
-        guild_id = str(interaction.guild_id)
-        config = dados["lives"]["config"].get(guild_id, {})
-        config["painel_channel_id"] = canal.id
-        await save_config(
-            guild_id,
-            config.get("target_guild"),
-            config.get("channel_ids", []),
-            config.get("role"),
-            config.get("platforms", {"twitch": True, "youtube": True, "kick": True, "tiktok": True}),
-            canal.id
-        )
-        await refresh_dados()
+    guild_id = str(interaction.guild_id)
+    config = dados["lives"]["config"].get(guild_id, {})
+    config["painel_channel_id"] = canal.id
+    await save_config(
+        guild_id,
+        config.get("target_guild"),
+        config.get("channel_ids_live", []),
+        config.get("channel_ids_staff", []),
+        config.get("role_live"),
+        config.get("role_staff"),
+        config.get("admin_role"),
+        config.get("platforms", {"twitch": True, "youtube": True, "kick": True, "tiktok": True}),
+        canal.id,
+        config.get("observacao_padrao", "")
+    )
+    await refresh_dados()
+    view = LiveConfigView(interaction.guild_id)
+    embed = await view.build_embed()
+    await canal.send(embed=embed, view=view)
+    await interaction.response.send_message(f"✅ Painel configurado em {canal.mention}.", ephemeral=True)
 
-        view = LiveConfigView(interaction.guild_id)
-        embed = await view.build_embed()
-        await canal.send(embed=embed, view=view)
-        await interaction.response.send_message(f"✅ Painel configurado para {canal.mention}.", ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Erro ao configurar: {e}", ephemeral=True)
+# ========= BOT PRINCIPAL =========
+bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 
-# ---- EVENTOS ----
 @bot.event
 async def on_ready():
     await init_db()
@@ -1180,20 +1422,13 @@ async def on_ready():
     dados = await load_all_data()
     print(f"✅ Bot de Lives online: {bot.user}")
 
-    # Sincronizar comandos slash (globalmente)
     try:
         synced = await bot.tree.sync()
         print(f"✅ Comandos slash sincronizados: {len(synced)}")
     except Exception as e:
         print(f"❌ Erro ao sincronizar comandos: {e}")
 
-    # Iniciar a task de verificação (definida após o bot)
-    if not live_check_loop.is_running():
-        live_check_loop.start()
-
-# ============================================================
-# INICIALIZAÇÃO
-# ============================================================
+    live_check_loop.start()
 
 if __name__ == "__main__":
     bot.run(TOKEN)
