@@ -35,7 +35,6 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     async with db_pool.acquire() as conn:
-        # Tabela de configuração (com canais e cargos separados)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS live_config (
                 guild_id TEXT PRIMARY KEY,
@@ -50,7 +49,6 @@ async def init_db():
                 observacao_padrao TEXT
             )
         """)
-        # Tabela de streamers (com created_at)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS live_streamers (
                 guild_id TEXT,
@@ -65,14 +63,12 @@ async def init_db():
                 PRIMARY KEY (guild_id, user_id)
             )
         """)
-        # Tabela de último ID notificado (evita spam de live)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS live_last_notified (
                 key TEXT PRIMARY KEY,
                 value TEXT
             )
         """)
-        # Tabela de status (online/offline)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS live_status (
                 guild_id TEXT,
@@ -82,7 +78,6 @@ async def init_db():
                 PRIMARY KEY (guild_id, user_id, platform)
             )
         """)
-        # Tabela de sessões ativas
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS live_sessions (
                 guild_id TEXT,
@@ -93,7 +88,6 @@ async def init_db():
                 PRIMARY KEY (guild_id, user_id, platform)
             )
         """)
-        # Tabela de horas totais acumuladas
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS live_hours (
                 guild_id TEXT,
@@ -102,8 +96,6 @@ async def init_db():
                 PRIMARY KEY (guild_id, user_id)
             )
         """)
-
-        # Migrações para garantir colunas
         await conn.execute("""
             DO $$
             BEGIN
@@ -151,7 +143,6 @@ async def load_all_data():
         }
     }
     async with db_pool.acquire() as conn:
-        # Config
         rows = await conn.fetch("""
             SELECT guild_id, target_guild_id, channel_ids_live, channel_ids_staff,
                    role_live_id, role_staff_id, admin_role_id, platforms, painel_channel_id, observacao_padrao
@@ -170,7 +161,6 @@ async def load_all_data():
                 "painel_channel_id": r["painel_channel_id"],
                 "observacao_padrao": r["observacao_padrao"] or ""
             }
-        # Streamers
         rows = await conn.fetch("SELECT guild_id, user_id, nome, twitch, youtube, kick, tiktok, observacao, created_at FROM live_streamers")
         for r in rows:
             guild_id = r["guild_id"]
@@ -186,11 +176,9 @@ async def load_all_data():
                 "observacao": r["observacao"],
                 "created_at": r["created_at"]
             }
-        # Last notified
         rows = await conn.fetch("SELECT key, value FROM live_last_notified")
         for r in rows:
             dados["lives"]["last_notified"][r["key"]] = r["value"]
-        # Status
         rows = await conn.fetch("SELECT guild_id, user_id, platform, is_live FROM live_status")
         for r in rows:
             guild_id = r["guild_id"]
@@ -201,7 +189,6 @@ async def load_all_data():
             if user_id not in dados["lives"]["status"][guild_id]:
                 dados["lives"]["status"][guild_id][user_id] = {}
             dados["lives"]["status"][guild_id][user_id][platform] = r["is_live"]
-        # Sessions
         rows = await conn.fetch("SELECT guild_id, user_id, platform, start_time, last_milestone_hours FROM live_sessions")
         for r in rows:
             guild_id = r["guild_id"]
@@ -218,7 +205,6 @@ async def load_all_data():
                 "start_time": start,
                 "last_milestone_hours": r["last_milestone_hours"]
             }
-        # Hours
         rows = await conn.fetch("SELECT guild_id, user_id, total_seconds FROM live_hours")
         for r in rows:
             guild_id = r["guild_id"]
@@ -228,7 +214,6 @@ async def load_all_data():
             dados["lives"]["hours"][guild_id][user_id] = r["total_seconds"]
     return dados
 
-# ========= FUNÇÕES DE BANCO =========
 async def save_config(guild_id, target_guild_id, channel_ids_live, channel_ids_staff,
                       role_live, role_staff, admin_role, platforms, painel_channel_id, observacao_padrao):
     async with db_pool.acquire() as conn:
@@ -322,14 +307,12 @@ async def reset_streamer_hours(guild_id, user_id=None):
         else:
             await conn.execute("UPDATE live_hours SET total_seconds = 0 WHERE guild_id = $1", guild_id)
 
-# ========= CARREGAR DADOS =========
 dados = None
 
 async def refresh_dados():
     global dados
     dados = await load_all_data()
 
-# ========= FUNÇÕES AUXILIARES =========
 def is_admin(member, guild_id=None):
     if member.guild_permissions.administrator:
         return True
@@ -509,6 +492,9 @@ async def send_to_channels(guild, channel_ids, role_mention, embed, view=None):
         if canal:
             await send_notification(canal, role_mention, embed, view)
 
+# ========= CRIAÇÃO DO BOT (ANTES DAS CLASSES QUE USAM 'bot') =========
+bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
+
 # ========= CLASSES DO PAINEL (VIEWS E MODAIS) =========
 class LiveConfigView(View):
     def __init__(self, guild_id):
@@ -633,13 +619,14 @@ class LiveConfigView(View):
         await interaction.followup.send("✅ Horas de todos os streamers resetadas.", ephemeral=True)
 
 class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
-    live_canais = TextInput(label="IDs dos canais de LIVE (separados por vírgula)", placeholder="Ex: 123,456", required=True)
-    staff_canais = TextInput(label="IDs dos canais de STAFF (separados por vírgula)", placeholder="Ex: 789,101", required=True)
-    cargo_live = TextInput(label="ID do cargo para ping (live)", required=True)
-    cargo_staff = TextInput(label="ID do cargo para ping (staff)", required=True)
-    cargo_admin = TextInput(label="ID do cargo administrador (opcional)", required=False, placeholder="Deixe em branco para usar admin do servidor")
-    servidor_destino = TextInput(label="ID do servidor destino (opcional)", required=False, placeholder="Deixe em branco para este servidor")
-    obs_padrao = TextInput(label="Observação padrão (opcional)", required=False, placeholder="Mensagem extra em todas as notificações")
+    # Labels reduzidos para <= 45 caracteres
+    live_canais = TextInput(label="IDs canais LIVE (vírgula)", placeholder="Ex: 123,456", required=True)
+    staff_canais = TextInput(label="IDs canais STAFF (vírgula)", placeholder="Ex: 789,101", required=True)
+    cargo_live = TextInput(label="ID cargo ping (live)", required=True)
+    cargo_staff = TextInput(label="ID cargo ping (staff)", required=True)
+    cargo_admin = TextInput(label="ID cargo admin (opcional)", required=False, placeholder="Deixe em branco")
+    servidor_destino = TextInput(label="ID servidor destino (opcional)", required=False, placeholder="Deixe em branco")
+    obs_padrao = TextInput(label="Observação padrão (opcional)", required=False, placeholder="Mensagem extra")
 
     def __init__(self, guild_id, parent_view):
         super().__init__()
@@ -889,7 +876,6 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
             pass
 
 async def check_streamer_now(guild_id_str, uid, guild):
-    """Verifica se o streamer está ao vivo e envia notificação imediatamente."""
     config = dados["lives"]["config"].get(guild_id_str, {})
     streamer_data = dados["lives"]["streamers"].get(guild_id_str, {}).get(uid)
     if not streamer_data:
@@ -982,9 +968,6 @@ async def check_streamer_now(guild_id_str, uid, guild):
             view = View(timeout=None)
             view.add_item(Button(label="Assistir Agora", style=discord.ButtonStyle.link, url=live_info["url"]))
             await send_to_channels(guild, channel_ids_live, role_mention, embed, view=view)
-
-# ========= CRIAÇÃO DO BOT =========
-bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 
 # ========= TASK DE VERIFICAÇÃO =========
 @tasks.loop(minutes=1)
