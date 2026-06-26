@@ -1,0 +1,5 @@
+{
+  "deploy": {
+    "startCommand": "pip install asyncpg && python Discord.py"
+  }
+}
