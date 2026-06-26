@@ -497,9 +497,10 @@ bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 
 # ========= CLASSES DO PAINEL (VIEWS E MODAIS) =========
 class LiveConfigView(View):
-    def __init__(self, guild_id):
+    def __init__(self, guild_id, page=0):
         super().__init__(timeout=None)
         self.guild_id = guild_id
+        self.current_page = page
 
     async def get_config(self):
         return dados["lives"]["config"].get(str(self.guild_id), {
@@ -514,7 +515,9 @@ class LiveConfigView(View):
             "observacao_padrao": ""
         })
 
-    async def build_embed(self):
+    async def build_embed(self, page=None):
+        if page is not None:
+            self.current_page = page
         config = await self.get_config()
         live_canais = "\n".join(f"<#{cid}>" for cid in config['channel_ids_live']) or "Não definido"
         staff_canais = "\n".join(f"<#{cid}>" for cid in config['channel_ids_staff']) or "Não definido"
@@ -542,10 +545,27 @@ class LiveConfigView(View):
         embed.add_field(name="📝 Observação padrão", value=obs_padrao, inline=False)
         embed.add_field(name="🎮 Plataformas", value=status_plats, inline=True)
 
+        # --- STREAMERS (PAGINADO) ---
         streamers = dados["lives"]["streamers"].get(str(self.guild_id), {})
         if streamers:
+            # Converter para lista para paginação
+            items = list(streamers.items())
+            total = len(items)
+            per_page = 10
+            total_pages = max(1, (total + per_page - 1) // per_page)
+
+            # Garantir que a página atual seja válida
+            if self.current_page >= total_pages:
+                self.current_page = total_pages - 1
+            if self.current_page < 0:
+                self.current_page = 0
+
+            start = self.current_page * per_page
+            end = start + per_page
+            page_items = items[start:end]
+
             lista = ""
-            for uid, data in streamers.items():
+            for uid, data in page_items:
                 nome = data.get("nome", uid)
                 created_at = data.get("created_at")
                 data_str = format_date(created_at) if created_at else "Data desconhecida"
@@ -553,10 +573,10 @@ class LiveConfigView(View):
                 for p in ["twitch", "youtube", "kick", "tiktok"]:
                     sess = dados["lives"]["sessions"].get(str(self.guild_id), {}).get(uid, {}).get(p)
                     if sess:
-                        start = sess["start_time"]
-                        if start.tzinfo is None:
-                            start = start.replace(tzinfo=timezone.utc)
-                        duration = (datetime.now(timezone.utc) - start).total_seconds()
+                        start_time = sess["start_time"]
+                        if start_time.tzinfo is None:
+                            start_time = start_time.replace(tzinfo=timezone.utc)
+                        duration = (datetime.now(timezone.utc) - start_time).total_seconds()
                         if duration > 0:
                             total_sec += duration
                 horas = format_hours(total_sec)
@@ -569,12 +589,52 @@ class LiveConfigView(View):
                         plats_list.append(f"{emoji} {p.capitalize()}: {data[p]}")
                 if plats_list:
                     lista += f"**<@{uid}>** - ⏱️ {horas}\n" + "\n".join(plats_list) + f"\n📅 {data_str}\n\n"
+
             if lista:
-                embed.add_field(name="📋 Streamers Cadastrados", value=lista[:1024], inline=False)
+                # Adicionar campo com os streamers da página
+                embed.add_field(name=f"📋 Streamers Cadastrados (página {self.current_page+1}/{total_pages})",
+                                value=lista[:1024], inline=False)
+            else:
+                embed.add_field(name="📋 Streamers", value="Nenhum streamer nesta página.", inline=False)
+
+            # Adicionar rodapé com informações de página
+            embed.set_footer(text=f"Página {self.current_page+1} de {total_pages} | Total: {total} streamers")
+        else:
+            embed.add_field(name="📋 Streamers Cadastrados", value="Nenhum streamer cadastrado.", inline=False)
 
         return embed
 
-    @discord.ui.button(label="📝 Configurar Canais/Cargos", style=discord.ButtonStyle.secondary, emoji="📝")
+    # ---- BOTÕES DE PÁGINA ----
+    @discord.ui.button(label="◀️", style=discord.ButtonStyle.secondary, row=2)
+    async def previous_page(self, interaction: discord.Interaction, button: Button):
+        if not is_admin(interaction.user, self.guild_id):
+            await interaction.response.send_message("Sem permissão.", ephemeral=True)
+            return
+        if self.current_page > 0:
+            self.current_page -= 1
+            embed = await self.build_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.send_message("Você já está na primeira página.", ephemeral=True)
+
+    @discord.ui.button(label="▶️", style=discord.ButtonStyle.secondary, row=2)
+    async def next_page(self, interaction: discord.Interaction, button: Button):
+        if not is_admin(interaction.user, self.guild_id):
+            await interaction.response.send_message("Sem permissão.", ephemeral=True)
+            return
+        # Calcular total de páginas
+        streamers = dados["lives"]["streamers"].get(str(self.guild_id), {})
+        total = len(streamers)
+        total_pages = max(1, (total + 9) // 10)  # 10 por página
+        if self.current_page < total_pages - 1:
+            self.current_page += 1
+            embed = await self.build_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.send_message("Você já está na última página.", ephemeral=True)
+
+    # ---- BOTÕES ORIGINAIS (ajustados para manter a página) ----
+    @discord.ui.button(label="📝 Configurar Canais/Cargos", style=discord.ButtonStyle.secondary, emoji="📝", row=0)
     async def set_channels(self, interaction: discord.Interaction, button: Button):
         if not is_admin(interaction.user, self.guild_id):
             await interaction.response.send_message("Você não tem permissão para isso.", ephemeral=True)
@@ -582,7 +642,7 @@ class LiveConfigView(View):
         modal = SetChannelsModal(self.guild_id, self)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="⚙️ Gerenciar Streamers", style=discord.ButtonStyle.secondary, emoji="⚙️")
+    @discord.ui.button(label="⚙️ Gerenciar Streamers", style=discord.ButtonStyle.secondary, emoji="⚙️", row=0)
     async def gerenciar(self, interaction: discord.Interaction, button: Button):
         if not is_admin(interaction.user, self.guild_id):
             await interaction.response.send_message("Permissão negada.", ephemeral=True)
@@ -603,6 +663,8 @@ class LiveConfigView(View):
             return
         await interaction.response.defer()
         await refresh_dados()
+        # Resetar para primeira página ao atualizar
+        self.current_page = 0
         embed = await self.build_embed()
         await interaction.message.edit(embed=embed, view=self)
 
@@ -618,21 +680,21 @@ class LiveConfigView(View):
         await interaction.message.edit(embed=embed, view=self)
         await interaction.followup.send("✅ Horas de todos os streamers resetadas.", ephemeral=True)
 
-# ---- MODAL COM 5 CAMPOS SEPARADOS (sem observação) ----
+# ---- MODAL COM CAMPOS SEPARADOS PARA LIVE E STAFF (5 CAMPOS) ----
 class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
     live_canais = TextInput(
-        label="IDs dos canais LIVE (separados por vírgula)",
-        placeholder="Ex: 123456789,987654321",
+        label="IDs dos canais de LIVE (vírgula)",
+        placeholder="Ex: 123456,789101",
         required=True
     )
     staff_canais = TextInput(
-        label="IDs dos canais STAFF (separados por vírgula)",
-        placeholder="Ex: 123456789,987654321",
+        label="IDs dos canais de STAFF (vírgula)",
+        placeholder="Ex: 112233,445566",
         required=True
     )
-    cargo_live = TextInput(label="ID do cargo para ping (live)", required=True)
-    cargo_staff = TextInput(label="ID do cargo para ping (staff)", required=True)
-    cargo_admin = TextInput(label="ID do cargo administrador (opcional)", required=False, placeholder="Deixe em branco")
+    cargo_live = TextInput(label="ID cargo ping (live)", required=True)
+    cargo_staff = TextInput(label="ID cargo ping (staff)", required=True)
+    cargo_admin = TextInput(label="ID cargo admin (opcional)", required=False, placeholder="Deixe em branco")
 
     def __init__(self, guild_id, parent_view):
         super().__init__()
@@ -646,7 +708,7 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
             staff_ids = [int(x.strip()) for x in self.staff_canais.value.split(',') if x.strip().isdigit()]
 
             if not live_ids or not staff_ids:
-                await interaction.followup.send("Canais inválidos. Certifique-se de digitar IDs numéricos separados por vírgula.", ephemeral=True)
+                await interaction.followup.send("IDs de canais inválidos. Use apenas números separados por vírgula.", ephemeral=True)
                 return
 
             role_live = int(self.cargo_live.value.strip())
@@ -659,13 +721,12 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
             config["role_live"] = role_live
             config["role_staff"] = role_staff
             config["admin_role"] = admin_role
-            # Mantém target_guild e observacao_padrao existentes
             if "platforms" not in config:
                 config["platforms"] = {"twitch": True, "youtube": True, "kick": True, "tiktok": True}
 
             await save_config(
                 str(self.guild_id),
-                config.get("target_guild"),  # mantém
+                config.get("target_guild"),
                 live_ids,
                 staff_ids,
                 role_live,
@@ -673,7 +734,7 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
                 admin_role,
                 config["platforms"],
                 config.get("painel_channel_id"),
-                config.get("observacao_padrao", "")  # mantém a observação atual
+                config.get("observacao_padrao", "")
             )
             await refresh_dados()
             embed = await self.parent_view.build_embed()
@@ -1302,12 +1363,12 @@ async def live_check_loop():
                 try:
                     async for msg in painel_channel.history(limit=10):
                         if msg.author == bot.user:
-                            view = LiveConfigView(guild.id)
+                            view = LiveConfigView(guild.id, page=0)
                             embed = await view.build_embed()
                             await msg.edit(embed=embed, view=view)
                             break
                     else:
-                        view = LiveConfigView(guild.id)
+                        view = LiveConfigView(guild.id, page=0)
                         embed = await view.build_embed()
                         await painel_channel.send(embed=embed, view=view)
                 except Exception as e:
@@ -1323,7 +1384,7 @@ async def cmd_painel_lives(ctx):
     if not is_admin(ctx.author, ctx.guild.id):
         await ctx.send("❌ Você não tem permissão para usar este comando.", delete_after=5)
         return
-    view = LiveConfigView(ctx.guild.id)
+    view = LiveConfigView(ctx.guild.id, page=0)
     embed = await view.build_embed()
     await ctx.send(embed=embed, view=view)
 
@@ -1375,7 +1436,7 @@ async def setpainel(interaction: discord.Interaction, canal: discord.TextChannel
         config.get("observacao_padrao", "")
     )
     await refresh_dados()
-    view = LiveConfigView(interaction.guild_id)
+    view = LiveConfigView(interaction.guild_id, page=0)
     embed = await view.build_embed()
     await canal.send(embed=embed, view=view)
     await interaction.response.send_message(f"✅ Painel configurado em {canal.mention}.", ephemeral=True)
