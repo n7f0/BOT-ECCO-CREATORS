@@ -618,9 +618,8 @@ class LiveConfigView(View):
         await interaction.message.edit(embed=embed, view=self)
         await interaction.followup.send("✅ Horas de todos os streamers resetadas.", ephemeral=True)
 
-# ---- MODAL COM 5 CAMPOS ----
+# ---- MODAL COM 5 CAMPOS (sem servidor destino) ----
 class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
-    # Campo único para canais: formato "live:123,456; staff:789,101" ou simples "123,456;789,101"
     canais = TextInput(
         label="Canais (LIVE;STAFF) separados por ;",
         placeholder="Ex: 123,456;789,101",
@@ -629,7 +628,7 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
     cargo_live = TextInput(label="ID cargo ping (live)", required=True)
     cargo_staff = TextInput(label="ID cargo ping (staff)", required=True)
     cargo_admin = TextInput(label="ID cargo admin (opcional)", required=False, placeholder="Deixe em branco")
-    servidor_destino = TextInput(label="ID servidor destino (opcional)", required=False, placeholder="Deixe em branco")
+    observacao = TextInput(label="Observação padrão (opcional)", required=False, placeholder="Mensagem extra")
 
     def __init__(self, guild_id, parent_view):
         super().__init__()
@@ -639,12 +638,10 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            # Processar canais
             raw = self.canais.value.strip()
             if ';' in raw:
                 live_part, staff_part = raw.split(';', 1)
             else:
-                # Se não tiver ';', assume que ambos são iguais ou apenas live
                 live_part = raw
                 staff_part = raw
 
@@ -658,11 +655,7 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
             role_live = int(self.cargo_live.value.strip())
             role_staff = int(self.cargo_staff.value.strip())
             admin_role = int(self.cargo_admin.value.strip()) if self.cargo_admin.value.strip() else None
-            target_gid = int(self.servidor_destino.value.strip()) if self.servidor_destino.value.strip() else None
-
-            if target_gid and not bot.get_guild(target_gid):
-                await interaction.followup.send("❌ Bot não está no servidor destino.", ephemeral=True)
-                return
+            obs = self.observacao.value.strip()
 
             config = dados["lives"]["config"].setdefault(str(self.guild_id), {})
             config["channel_ids_live"] = live_ids
@@ -670,14 +663,14 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
             config["role_live"] = role_live
             config["role_staff"] = role_staff
             config["admin_role"] = admin_role
-            config["target_guild"] = target_gid
-            # Mantém a observação padrão existente (não alterada)
+            config["observacao_padrao"] = obs
+            # Mantém target_guild existente (não alterado)
             if "platforms" not in config:
                 config["platforms"] = {"twitch": True, "youtube": True, "kick": True, "tiktok": True}
 
             await save_config(
                 str(self.guild_id),
-                target_gid,
+                config.get("target_guild"),  # mantém o valor atual
                 live_ids,
                 staff_ids,
                 role_live,
@@ -685,7 +678,7 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
                 admin_role,
                 config["platforms"],
                 config.get("painel_channel_id"),
-                config.get("observacao_padrao", "")
+                obs
             )
             await refresh_dados()
             embed = await self.parent_view.build_embed()
