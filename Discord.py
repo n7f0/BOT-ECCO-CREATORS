@@ -1125,8 +1125,11 @@ class TestLiveDropdown(Select):
         else:
             await interaction.followup.send(f"❌ Streamer <@{uid}> não está ao vivo em nenhuma plataforma ativa.", ephemeral=True)
 
-        # Fecha a view de seleção
-        await interaction.message.edit(content="Teste concluído.", embed=None, view=None)
+        # CORREÇÃO: edita a mensagem original usando edit_original_response (em vez de message.edit)
+        try:
+            await interaction.edit_original_response(content="Teste concluído.", embed=None, view=None)
+        except Exception as e:
+            logger.warning(f"Não foi possível editar a mensagem original: {e}")
 
 # ---- FUNÇÃO PARA VERIFICAÇÃO IMEDIATA APÓS ADIÇÃO ----
 async def check_streamer_now(guild_id_str, uid, guild):
