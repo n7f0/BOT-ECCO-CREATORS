@@ -897,8 +897,12 @@ class LiveConfigView(View):
         if not is_admin(interaction.user, self.guild_id):
             await interaction.response.send_message("Você não tem permissão para isso.", ephemeral=True)
             return
-        modal = SetChannelsModal(self.guild_id, self)
-        await interaction.response.send_modal(modal)
+        try:
+            modal = SetChannelsModal(self.guild_id, self)
+            await interaction.response.send_modal(modal)
+        except Exception as e:
+            logger.error(f"Erro ao abrir modal: {e}", exc_info=True)
+            await interaction.response.send_message(f"❌ Erro ao abrir o formulário: {e}", ephemeral=True)
 
     @discord.ui.button(label="⚙️ Gerenciar Streamers", style=discord.ButtonStyle.secondary, emoji="⚙️", row=0)
     async def gerenciar(self, interaction: discord.Interaction, button: Button):
@@ -950,7 +954,7 @@ class LiveConfigView(View):
         embed = discord.Embed(title="🔍 Selecione um streamer para testar", color=0x7289da)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-# ---- MODAL CONFIG ----
+# ---- MODAL CONFIG (CORRIGIDO COM TIMEOUT E TRATAMENTO DE ERRO) ----
 class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
     live_canais = TextInput(
         label="IDs dos canais de LIVE (vírgula)",
@@ -972,7 +976,7 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
     )
 
     def __init__(self, guild_id, parent_view):
-        super().__init__()
+        super().__init__(timeout=600)  # 10 minutos para preencher
         self.guild_id = guild_id
         self.parent_view = parent_view
 
@@ -1017,8 +1021,11 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
             embed = await self.parent_view.build_embed()
             await interaction.message.edit(embed=embed, view=self.parent_view)
             await interaction.followup.send("✅ Configuração salva!", ephemeral=True)
+        except ValueError as ve:
+            await interaction.followup.send(f"❌ Erro ao converter IDs: {ve}. Certifique-se de que os campos de ID contenham apenas números.", ephemeral=True)
         except Exception as e:
-            await interaction.followup.send(f"Erro: {e}", ephemeral=True)
+            logger.error(f"Erro ao salvar configuração: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ Erro inesperado: {e}", ephemeral=True)
 
 # ---- GERENCIAR STREAMERS ----
 class ConfigStreamersView(View):
@@ -1101,93 +1108,97 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
     )
 
     def __init__(self, guild_id, parent_view):
-        super().__init__()
+        super().__init__(timeout=300)
         self.guild_id = guild_id
         self.parent_view = parent_view
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        plat_input = self.plataforma.value.strip().lower()
-        username_input = self.username.value.strip()
+        try:
+            plat_input = self.plataforma.value.strip().lower()
+            username_input = self.username.value.strip()
 
-        extracted_plat, extracted_id = extract_platform_from_url(username_input)
-        if extracted_plat and extracted_id:
-            platform = extracted_plat
-            identifier = extracted_id
-            nome_streamer = identifier
-        else:
-            if plat_input not in ["twitch", "youtube", "kick", "tiktok"]:
-                await interaction.followup.send("Plataforma inválida.", ephemeral=True)
-                return
-            platform = plat_input
-            identifier = username_input
-            nome_streamer = identifier
-
-        # ----- CORREÇÃO: resolve o channel ID do YouTube no cadastro -----
-        if platform == "youtube":
-            if not identifier.startswith("UC"):
-                channel_id = await get_youtube_channel_id(identifier)
-                if channel_id:
-                    identifier = channel_id
-                    logger.info(f"YouTube: handle {username_input} resolvido para ID {channel_id}")
-                else:
-                    await interaction.followup.send("❌ Não foi possível encontrar o canal do YouTube. Verifique o nome/handle.", ephemeral=True)
+            extracted_plat, extracted_id = extract_platform_from_url(username_input)
+            if extracted_plat and extracted_id:
+                platform = extracted_plat
+                identifier = extracted_id
+                nome_streamer = identifier
+            else:
+                if plat_input not in ["twitch", "youtube", "kick", "tiktok"]:
+                    await interaction.followup.send("Plataforma inválida.", ephemeral=True)
                     return
+                platform = plat_input
+                identifier = username_input
+                nome_streamer = identifier
 
-        uid = str(interaction.user.id)
-        if self.discord_user.value.strip():
+            # ----- CORREÇÃO: resolve o channel ID do YouTube no cadastro -----
+            if platform == "youtube":
+                if not identifier.startswith("UC"):
+                    channel_id = await get_youtube_channel_id(identifier)
+                    if channel_id:
+                        identifier = channel_id
+                        logger.info(f"YouTube: handle {username_input} resolvido para ID {channel_id}")
+                    else:
+                        await interaction.followup.send("❌ Não foi possível encontrar o canal do YouTube. Verifique o nome/handle.", ephemeral=True)
+                        return
+
+            uid = str(interaction.user.id)
+            if self.discord_user.value.strip():
+                try:
+                    uid_str = self.discord_user.value.strip().replace("<@!", "").replace("<@", "").replace(">", "")
+                    uid = str(int(uid_str))
+                    member = interaction.guild.get_member(int(uid))
+                    if member:
+                        nome_streamer = member.display_name
+                except:
+                    pass
+
+            if not is_admin(interaction.user, self.guild_id) and uid != str(interaction.user.id):
+                await interaction.followup.send("Você só pode adicionar seu próprio canal.", ephemeral=True)
+                return
+
+            guild_str = str(self.guild_id)
+            current = dados["lives"]["streamers"].get(guild_str, {}).get(uid, {})
+            await save_streamer(
+                guild_str, uid,
+                nome=current.get("nome", nome_streamer),
+                twitch=current.get("twitch") if platform != "twitch" else identifier,
+                youtube=current.get("youtube") if platform != "youtube" else identifier,
+                kick=current.get("kick") if platform != "kick" else identifier,
+                tiktok=current.get("tiktok") if platform != "tiktok" else identifier,
+                observacao=current.get("observacao", "")
+            )
+            await refresh_dados()
+
+            guild = interaction.guild
+            resultado = await test_streamer_live(guild_str, uid, guild)
+
+            if "erro" in resultado:
+                await interaction.followup.send(f"❌ {resultado['erro']}", ephemeral=True)
+                return
+
+            status_texto = []
+            for plat, status in resultado.items():
+                if plat in ["twitch", "youtube", "kick", "tiktok"]:
+                    status_texto.append(f"{plat.capitalize()}: {'🟢 Ao vivo' if status else '🔴 Offline'}")
+
+            mensagem = f"✅ Streamer **{nome_streamer}** adicionado em **{platform}**!\n\n**Status atual:**\n" + "\n".join(status_texto)
+
+            if resultado.get("notificacao_enviada"):
+                mensagem += "\n\n📢 **Notificação de live enviada!**"
+            else:
+                mensagem += "\n\n❌ **Nenhuma live ativa no momento.**"
+
+            await interaction.followup.send(mensagem, ephemeral=True)
+
             try:
-                uid_str = self.discord_user.value.strip().replace("<@!", "").replace("<@", "").replace(">", "")
-                uid = str(int(uid_str))
-                member = interaction.guild.get_member(int(uid))
-                if member:
-                    nome_streamer = member.display_name
+                embed = await self.parent_view.build_embed()
+                await interaction.message.edit(embed=embed, view=self.parent_view)
             except:
                 pass
-
-        if not is_admin(interaction.user, self.guild_id) and uid != str(interaction.user.id):
-            await interaction.followup.send("Você só pode adicionar seu próprio canal.", ephemeral=True)
-            return
-
-        guild_str = str(self.guild_id)
-        current = dados["lives"]["streamers"].get(guild_str, {}).get(uid, {})
-        await save_streamer(
-            guild_str, uid,
-            nome=current.get("nome", nome_streamer),
-            twitch=current.get("twitch") if platform != "twitch" else identifier,
-            youtube=current.get("youtube") if platform != "youtube" else identifier,
-            kick=current.get("kick") if platform != "kick" else identifier,
-            tiktok=current.get("tiktok") if platform != "tiktok" else identifier,
-            observacao=current.get("observacao", "")
-        )
-        await refresh_dados()
-
-        guild = interaction.guild
-        resultado = await test_streamer_live(guild_str, uid, guild)
-
-        if "erro" in resultado:
-            await interaction.followup.send(f"❌ {resultado['erro']}", ephemeral=True)
-            return
-
-        status_texto = []
-        for plat, status in resultado.items():
-            if plat in ["twitch", "youtube", "kick", "tiktok"]:
-                status_texto.append(f"{plat.capitalize()}: {'🟢 Ao vivo' if status else '🔴 Offline'}")
-
-        mensagem = f"✅ Streamer **{nome_streamer}** adicionado em **{platform}**!\n\n**Status atual:**\n" + "\n".join(status_texto)
-
-        if resultado.get("notificacao_enviada"):
-            mensagem += "\n\n📢 **Notificação de live enviada!**"
-        else:
-            mensagem += "\n\n❌ **Nenhuma live ativa no momento.**"
-
-        await interaction.followup.send(mensagem, ephemeral=True)
-
-        try:
-            embed = await self.parent_view.build_embed()
-            await interaction.message.edit(embed=embed, view=self.parent_view)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Erro ao adicionar streamer: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ Erro inesperado: {e}", ephemeral=True)
 
 # ---- VIEW PARA SELECIONAR STREAMER NO TESTE ----
 class TestLiveSelectView(View):
