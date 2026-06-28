@@ -523,6 +523,109 @@ async def send_to_channels(guild, channel_ids, role_mention, embed, view=None):
         if canal:
             await send_notification(canal, role_mention, embed, view)
 
+# ========= FUNÇÃO AUXILIAR PARA TESTE MANUAL =========
+async def test_streamer_live(guild_id_str, uid, guild):
+    """Verifica se o streamer está ao vivo e envia notificação se estiver."""
+    config = dados["lives"]["config"].get(guild_id_str, {})
+    streamer_data = dados["lives"]["streamers"].get(guild_id_str, {}).get(uid)
+    if not streamer_data:
+        return False
+
+    plataformas = config.get("platforms", {})
+    channel_ids_live = config.get("channel_ids_live", [])
+    role_live_id = config.get("role_live")
+    role_mention = f"<@&{role_live_id}>" if role_live_id and guild.get_role(role_live_id) else ""
+    observacao_padrao = config.get("observacao_padrao", "")
+    qualquer_online = False
+
+    # Twitch
+    if plataformas.get("twitch") and streamer_data.get("twitch"):
+        twitch_name = streamer_data["twitch"]
+        lives = await check_twitch_lives([twitch_name])
+        if twitch_name.lower() in lives:
+            live_info = lives[twitch_name.lower()]
+            title = live_info.get("title", "")
+            nome = streamer_data.get("nome", twitch_name)
+            obs = streamer_data.get("observacao") or observacao_padrao
+            embed = discord.Embed(title="🔴 LIVE NA TWITCH", color=0x9146ff)
+            desc = f"**{nome}** está ao vivo na Twitch!"
+            if obs:
+                desc += f"\n{obs}"
+            embed.description = desc
+            embed.add_field(name="Título", value=title, inline=False)
+            embed.add_field(name="Link", value=f"https://twitch.tv/{twitch_name}", inline=False)
+            if 'thumbnail_url' in live_info:
+                thumb_url = live_info['thumbnail_url'].replace('{width}', '640').replace('{height}', '360')
+                embed.set_image(url=thumb_url)
+            embed.set_footer(text="Twitch • " + datetime.now().strftime("%H:%M"))
+            await send_to_channels(guild, channel_ids_live, role_mention, embed)
+            qualquer_online = True
+
+    # YouTube
+    if plataformas.get("youtube") and streamer_data.get("youtube"):
+        yt_ch = streamer_data["youtube"]
+        lives = await check_youtube_lives([yt_ch])
+        if yt_ch in lives:
+            video = lives[yt_ch]
+            title = video['snippet']['title']
+            video_id = video["id"]["videoId"]
+            nome = streamer_data.get("nome", yt_ch)
+            obs = streamer_data.get("observacao") or observacao_padrao
+            embed = discord.Embed(title="🔴 LIVE NO YOUTUBE", color=0xff0000)
+            desc = f"**{nome}** está ao vivo no YouTube!"
+            if obs:
+                desc += f"\n{obs}"
+            embed.description = desc
+            embed.add_field(name="Título", value=title, inline=False)
+            embed.add_field(name="Link", value=f"https://youtube.com/watch?v={video_id}", inline=False)
+            embed.set_footer(text="YouTube • " + datetime.now().strftime("%H:%M"))
+            await send_to_channels(guild, channel_ids_live, role_mention, embed)
+            qualquer_online = True
+
+    # Kick
+    if plataformas.get("kick") and streamer_data.get("kick"):
+        kick_name = streamer_data["kick"]
+        is_live, stream_info = await check_kick_live(kick_name)
+        if is_live:
+            title = stream_info.get("title", "")
+            nome = streamer_data.get("nome", kick_name)
+            obs = streamer_data.get("observacao") or observacao_padrao
+            embed = discord.Embed(title="🔴 LIVE NA KICK", color=0x53fc18)
+            desc = f"**{nome}** está ao vivo na Kick!"
+            if obs:
+                desc += f"\n{obs}"
+            embed.description = desc
+            embed.add_field(name="Título", value=title, inline=False)
+            embed.add_field(name="Espectadores", value=stream_info['viewer_count'], inline=False)
+            embed.add_field(name="Link", value=f"https://kick.com/{kick_name}", inline=False)
+            embed.set_footer(text="Kick • " + datetime.now().strftime("%H:%M"))
+            await send_to_channels(guild, channel_ids_live, role_mention, embed)
+            qualquer_online = True
+
+    # TikTok
+    if plataformas.get("tiktok") and streamer_data.get("tiktok"):
+        tiktok_name = streamer_data["tiktok"]
+        live_info = await check_tiktok_live(tiktok_name)
+        if live_info:
+            title = live_info.get("title", "")
+            nome = streamer_data.get("nome", tiktok_name)
+            obs = streamer_data.get("observacao") or observacao_padrao
+            embed = discord.Embed(title="🔴 LIVE NO TIKTOK", color=0xff0050, url=live_info["url"])
+            desc = f"**{nome}** está ao vivo no TikTok!"
+            if obs:
+                desc += f"\n{obs}"
+            embed.description = desc
+            embed.add_field(name="Título", value=title, inline=False)
+            embed.set_footer(text="TikTok • " + datetime.now().strftime("%H:%M"))
+            if live_info.get("thumbnail"):
+                embed.set_image(url=live_info["thumbnail"])
+            view = View(timeout=None)
+            view.add_item(Button(label="Assistir Agora", style=discord.ButtonStyle.link, url=live_info["url"]))
+            await send_to_channels(guild, channel_ids_live, role_mention, embed, view=view)
+            qualquer_online = True
+
+    return qualquer_online
+
 # ========= CRIAÇÃO DO BOT =========
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 
@@ -594,8 +697,8 @@ class LiveConfigView(View):
 
             lista = ""
             for uid, data in page_items:
-                # Força o uso do nome salvo no banco (nickname) em vez da menção
-                nome_exibicao = data.get("nome", uid)
+                # EXIBE A MENÇÃO (@) DO USUÁRIO
+                nome_exibicao = f"<@{uid}>"
                 created_at = data.get("created_at")
                 data_str = format_date(created_at) if created_at else "Data desconhecida"
                 total_sec = dados["lives"]["hours"].get(str(self.guild_id), {}).get(uid, 0)
@@ -703,6 +806,21 @@ class LiveConfigView(View):
         await interaction.message.edit(embed=embed, view=self)
         await interaction.followup.send("✅ Horas de todos os streamers resetadas.", ephemeral=True)
 
+    # NOVO BOTÃO: TESTAR LIVE
+    @discord.ui.button(label="🔍 Testar Live", style=discord.ButtonStyle.primary, emoji="🔍", row=2)
+    async def testar_live(self, interaction: discord.Interaction, button: Button):
+        if not is_admin(interaction.user, self.guild_id):
+            await interaction.response.send_message("Sem permissão.", ephemeral=True)
+            return
+        streamers = dados["lives"]["streamers"].get(str(self.guild_id), {})
+        if not streamers:
+            await interaction.response.send_message("Nenhum streamer cadastrado.", ephemeral=True)
+            return
+        view = TestLiveSelectView(self.guild_id, self)
+        embed = discord.Embed(title="🔍 Selecione um streamer para testar", color=0x7289da)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+# ---- MODAL CONFIG ----
 class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
     live_canais = TextInput(
         label="IDs dos canais de LIVE (vírgula)",
@@ -765,6 +883,7 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
         except Exception as e:
             await interaction.followup.send(f"Erro: {e}", ephemeral=True)
 
+# ---- GERENCIAR STREAMERS ----
 class ConfigStreamersView(View):
     def __init__(self, guild_id, parent_view):
         super().__init__(timeout=None)
@@ -854,6 +973,7 @@ class ConfigStreamersView(View):
         embed = await self.parent_view.build_embed()
         await interaction.followup.send(embed=embed, view=self.parent_view, ephemeral=True)
 
+# ---- REMOVER STREAMER ----
 class RemoveStreamerSelectView(View):
     def __init__(self, guild_id, parent_view):
         super().__init__(timeout=120)
@@ -889,6 +1009,7 @@ class StreamerRemoveDropdown(Select):
         except:
             pass
 
+# ---- ADICIONAR STREAMER ----
 class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
     plataforma = TextInput(label="PLATAFORMA (twitch/youtube/kick/tiktok)", placeholder="Ex: twitch", required=True)
     username = TextInput(label="USERNAME OU LINK", placeholder="Ex: alanzoka ou https://twitch.tv/alanzoka", required=True)
@@ -957,95 +1078,59 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
         except:
             pass
 
+# ---- VIEW PARA SELECIONAR STREAMER NO TESTE ----
+class TestLiveSelectView(View):
+    def __init__(self, guild_id, parent_view):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.parent_view = parent_view
+        streamers = dados["lives"]["streamers"].get(str(guild_id), {})
+        options = []
+        for uid, data in streamers.items():
+            nome = data.get("nome", uid)
+            plats = [p.capitalize() for p in ["twitch", "youtube", "kick", "tiktok"] if data.get(p)]
+            desc = f"{nome} ({', '.join(plats)})" if plats else nome
+            options.append(discord.SelectOption(label=desc[:100], value=uid))
+        if len(options) > 25:
+            options = options[:25]
+        if options:
+            self.add_item(TestLiveDropdown(options, guild_id, parent_view))
+        else:
+            # Se não houver opções, adiciona um botão de voltar
+            self.add_item(Button(label="Voltar", style=discord.ButtonStyle.secondary, custom_id="voltar_teste"))
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary, row=1)
+    async def cancelar(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.edit_message(content="Teste cancelado.", embed=None, view=None)
+
+class TestLiveDropdown(Select):
+    def __init__(self, options, guild_id, parent_view):
+        super().__init__(placeholder="Escolha um streamer para testar...", options=options)
+        self.guild_id = guild_id
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        uid = self.values[0]
+        guild = interaction.guild
+        if not guild:
+            await interaction.followup.send("Servidor não encontrado.", ephemeral=True)
+            return
+
+        # Executa o teste
+        online = await test_streamer_live(str(self.guild_id), uid, guild)
+
+        if online:
+            await interaction.followup.send(f"✅ Streamer <@{uid}> está ao vivo! Notificação enviada.", ephemeral=True)
+        else:
+            await interaction.followup.send(f"❌ Streamer <@{uid}> não está ao vivo em nenhuma plataforma ativa.", ephemeral=True)
+
+        # Fecha a view de seleção
+        await interaction.message.edit(content="Teste concluído.", embed=None, view=None)
+
+# ---- FUNÇÃO PARA VERIFICAÇÃO IMEDIATA APÓS ADIÇÃO ----
 async def check_streamer_now(guild_id_str, uid, guild):
-    config = dados["lives"]["config"].get(guild_id_str, {})
-    streamer_data = dados["lives"]["streamers"].get(guild_id_str, {}).get(uid)
-    if not streamer_data:
-        return
-
-    plataformas = config.get("platforms", {})
-    channel_ids_live = config.get("channel_ids_live", [])
-    role_live_id = config.get("role_live")
-    role_mention = f"<@&{role_live_id}>" if role_live_id and guild.get_role(role_live_id) else ""
-    observacao_padrao = config.get("observacao_padrao", "")
-
-    if plataformas.get("twitch") and streamer_data.get("twitch"):
-        twitch_name = streamer_data["twitch"]
-        lives = await check_twitch_lives([twitch_name])
-        if twitch_name.lower() in lives:
-            live_info = lives[twitch_name.lower()]
-            title = live_info.get("title", "")
-            nome = streamer_data.get("nome", twitch_name)
-            obs = streamer_data.get("observacao") or observacao_padrao
-            embed = discord.Embed(title="🔴 LIVE NA TWITCH", color=0x9146ff)
-            desc = f"**{nome}** está ao vivo na Twitch!"
-            if obs:
-                desc += f"\n{obs}"
-            embed.description = desc
-            embed.add_field(name="Título", value=title, inline=False)
-            embed.add_field(name="Link", value=f"https://twitch.tv/{twitch_name}", inline=False)
-            if 'thumbnail_url' in live_info:
-                thumb_url = live_info['thumbnail_url'].replace('{width}', '640').replace('{height}', '360')
-                embed.set_image(url=thumb_url)
-            embed.set_footer(text="Twitch • " + datetime.now().strftime("%H:%M"))
-            await send_to_channels(guild, channel_ids_live, role_mention, embed)
-
-    if plataformas.get("youtube") and streamer_data.get("youtube"):
-        yt_ch = streamer_data["youtube"]
-        lives = await check_youtube_lives([yt_ch])
-        if yt_ch in lives:
-            video = lives[yt_ch]
-            title = video['snippet']['title']
-            video_id = video["id"]["videoId"]
-            nome = streamer_data.get("nome", yt_ch)
-            obs = streamer_data.get("observacao") or observacao_padrao
-            embed = discord.Embed(title="🔴 LIVE NO YOUTUBE", color=0xff0000)
-            desc = f"**{nome}** está ao vivo no YouTube!"
-            if obs:
-                desc += f"\n{obs}"
-            embed.description = desc
-            embed.add_field(name="Título", value=title, inline=False)
-            embed.add_field(name="Link", value=f"https://youtube.com/watch?v={video_id}", inline=False)
-            embed.set_footer(text="YouTube • " + datetime.now().strftime("%H:%M"))
-            await send_to_channels(guild, channel_ids_live, role_mention, embed)
-
-    if plataformas.get("kick") and streamer_data.get("kick"):
-        kick_name = streamer_data["kick"]
-        is_live, stream_info = await check_kick_live(kick_name)
-        if is_live:
-            title = stream_info.get("title", "")
-            nome = streamer_data.get("nome", kick_name)
-            obs = streamer_data.get("observacao") or observacao_padrao
-            embed = discord.Embed(title="🔴 LIVE NA KICK", color=0x53fc18)
-            desc = f"**{nome}** está ao vivo na Kick!"
-            if obs:
-                desc += f"\n{obs}"
-            embed.description = desc
-            embed.add_field(name="Título", value=title, inline=False)
-            embed.add_field(name="Espectadores", value=stream_info['viewer_count'], inline=False)
-            embed.add_field(name="Link", value=f"https://kick.com/{kick_name}", inline=False)
-            embed.set_footer(text="Kick • " + datetime.now().strftime("%H:%M"))
-            await send_to_channels(guild, channel_ids_live, role_mention, embed)
-
-    if plataformas.get("tiktok") and streamer_data.get("tiktok"):
-        tiktok_name = streamer_data["tiktok"]
-        live_info = await check_tiktok_live(tiktok_name)
-        if live_info:
-            title = live_info.get("title", "")
-            nome = streamer_data.get("nome", tiktok_name)
-            obs = streamer_data.get("observacao") or observacao_padrao
-            embed = discord.Embed(title="🔴 LIVE NO TIKTOK", color=0xff0050, url=live_info["url"])
-            desc = f"**{nome}** está ao vivo no TikTok!"
-            if obs:
-                desc += f"\n{obs}"
-            embed.description = desc
-            embed.add_field(name="Título", value=title, inline=False)
-            embed.set_footer(text="TikTok • " + datetime.now().strftime("%H:%M"))
-            if live_info.get("thumbnail"):
-                embed.set_image(url=live_info["thumbnail"])
-            view = View(timeout=None)
-            view.add_item(Button(label="Assistir Agora", style=discord.ButtonStyle.link, url=live_info["url"]))
-            await send_to_channels(guild, channel_ids_live, role_mention, embed, view=view)
+    await test_streamer_live(guild_id_str, uid, guild)  # reutiliza a mesma função
 
 # ========= TASK DE VERIFICAÇÃO =========
 @tasks.loop(minutes=1)
