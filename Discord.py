@@ -162,7 +162,7 @@ async def load_all_data():
                 "role_live": r["role_live_id"],
                 "role_staff": r["role_staff_id"],
                 "admin_role": r["admin_role_id"],
-                "target_guild": r["target_guild_id"],
+                "target_guild": r["target_guild_id"],  # mantido para compatibilidade, mas não será usado
                 "platforms": json.loads(r["platforms"]) if r["platforms"] else {"twitch": True, "youtube": True, "kick": True, "tiktok": True},
                 "painel_channel_id": r["painel_channel_id"],
                 "observacao_padrao": r["observacao_padrao"] or ""
@@ -220,8 +220,9 @@ async def load_all_data():
             dados["lives"]["hours"][guild_id][user_id] = r["total_seconds"]
     return dados
 
-async def save_config(guild_id, target_guild_id, channel_ids_live, channel_ids_staff,
+async def save_config(guild_id, channel_ids_live, channel_ids_staff,
                       role_live, role_staff, admin_role, platforms, painel_channel_id, observacao_padrao):
+    # target_guild_id agora é sempre None (usamos o próprio servidor)
     async with db_pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO live_config (guild_id, target_guild_id, channel_ids_live, channel_ids_staff,
@@ -237,7 +238,7 @@ async def save_config(guild_id, target_guild_id, channel_ids_live, channel_ids_s
                 platforms = EXCLUDED.platforms,
                 painel_channel_id = EXCLUDED.painel_channel_id,
                 observacao_padrao = EXCLUDED.observacao_padrao
-        """, guild_id, target_guild_id, json.dumps(channel_ids_live), json.dumps(channel_ids_staff),
+        """, guild_id, None, json.dumps(channel_ids_live), json.dumps(channel_ids_staff),
            role_live, role_staff, admin_role, json.dumps(platforms), painel_channel_id, observacao_padrao)
 
 async def save_streamer(guild_id, user_id, nome, twitch, youtube, kick, tiktok, observacao):
@@ -413,14 +414,12 @@ async def get_twitch_token():
             logger.error(f"Exceção ao obter token Twitch: {e}")
             return None
 
-# ---------- CORREÇÃO DEFINITIVA DA TWITCH (com validação de nomes e params) ----------
 async def check_twitch_lives(usernames):
     token = await get_twitch_token()
     if not token:
         logger.error("Sem token Twitch válido, pulando verificação")
         return {}
     
-    # Filtra nomes vazios e nomes inválidos (apenas letras, números, underline)
     valid_usernames = []
     invalid_usernames = []
     for u in usernames:
@@ -432,7 +431,7 @@ async def check_twitch_lives(usernames):
             invalid_usernames.append(u)
     
     if invalid_usernames:
-        logger.debug(f"Nomes de usuário inválidos para Twitch (serão ignorados): {invalid_usernames}")  # mudado para DEBUG
+        logger.debug(f"Nomes de usuário inválidos para Twitch (serão ignorados): {invalid_usernames}")
     
     if not valid_usernames:
         logger.info("Nenhum nome de usuário Twitch válido para verificar")
@@ -457,9 +456,7 @@ async def check_twitch_lives(usernames):
             logger.error(f"Erro ao verificar Twitch: {e}")
             return {}
 
-# ---------- CORREÇÃO DO YOUTUBE (resolução de handle) ----------
 async def get_youtube_channel_id(handle: str) -> str | None:
-    """Converte um handle (ex: @machida) ou nome de canal em channel ID."""
     if not YOUTUBE_API_KEY:
         return None
     handle = handle.lstrip('@')
@@ -598,7 +595,7 @@ async def send_to_channels(guild, channel_ids, role_mention, embed, view=None):
         if canal:
             await send_notification(canal, role_mention, embed, view)
 
-# ========= FUNÇÃO AUXILIAR PARA TESTE MANUAL =========
+# ========= FUNÇÃO AUXILIAR PARA TESTE MANUAL (agora usada apenas ao adicionar) =========
 async def test_streamer_live(guild_id_str, uid, guild):
     config = dados["lives"]["config"].get(guild_id_str, {})
     streamer_data = dados["lives"]["streamers"].get(guild_id_str, {}).get(uid)
@@ -775,7 +772,6 @@ class LiveConfigView(View):
             "role_live": None,
             "role_staff": None,
             "admin_role": None,
-            "target_guild": None,
             "platforms": {"twitch": True, "youtube": True, "kick": True, "tiktok": True},
             "painel_channel_id": None,
             "observacao_padrao": ""
@@ -789,8 +785,7 @@ class LiveConfigView(View):
         staff_canais = "\n".join(f"<#{cid}>" for cid in config['channel_ids_staff']) or "Não definido"
         cargo_live = f"<@&{config['role_live']}>" if config['role_live'] else "Não definido"
         cargo_staff = f"<@&{config['role_staff']}>" if config['role_staff'] else "Não definido"
-        cargo_admin = f"<@&{config['admin_role']}>" if config['admin_role'] else "Administradores do servidor"
-        target_info = f"Servidor: {config['target_guild']}" if config.get('target_guild') else "Mesmo servidor"
+        cargo_admin = f"<@&{config['admin_role']}>" if config['admin_role'] else "Não definido"
         obs_padrao = config.get('observacao_padrao') or "Nenhuma"
 
         plats = config['platforms']
@@ -807,7 +802,6 @@ class LiveConfigView(View):
         embed.add_field(name="👥 Cargo para ping (live)", value=cargo_live, inline=False)
         embed.add_field(name="👥 Cargo para ping (staff)", value=cargo_staff, inline=False)
         embed.add_field(name="🔑 Cargo Administrador", value=cargo_admin, inline=False)
-        embed.add_field(name="🎯 Servidor Destino", value=target_info, inline=False)
         embed.add_field(name="📝 Observação padrão", value=obs_padrao, inline=False)
         embed.add_field(name="🎮 Plataformas", value=status_plats, inline=True)
 
@@ -904,18 +898,6 @@ class LiveConfigView(View):
             logger.error(f"Erro ao abrir modal: {e}", exc_info=True)
             await interaction.response.send_message(f"❌ Erro ao abrir o formulário: {e}", ephemeral=True)
 
-    @discord.ui.button(label="🎯 Definir Servidor Destino", style=discord.ButtonStyle.primary, emoji="🎯", row=0)
-    async def set_target(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction.user, self.guild_id):
-            await interaction.response.send_message("Você não tem permissão para isso.", ephemeral=True)
-            return
-        try:
-            modal = SetTargetModal(self.guild_id, self)
-            await interaction.response.send_modal(modal)
-        except Exception as e:
-            logger.error(f"Erro ao abrir modal: {e}", exc_info=True)
-            await interaction.response.send_message(f"❌ Erro ao abrir o formulário: {e}", ephemeral=True)
-
     @discord.ui.button(label="⚙️ Gerenciar Streamers", style=discord.ButtonStyle.secondary, emoji="⚙️", row=1)
     async def gerenciar(self, interaction: discord.Interaction, button: Button):
         if not is_admin(interaction.user, self.guild_id):
@@ -925,10 +907,6 @@ class LiveConfigView(View):
         view = ConfigStreamersView(self.guild_id, self)
         embed = discord.Embed(title="⚙️ GERENCIAR STREAMERS", color=0x7289da)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-
-    @discord.ui.button(label="➕ Adicionar Streamer", style=discord.ButtonStyle.success, emoji="➕", row=1)
-    async def adicionar(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(AddStreamerByLinkModal(self.guild_id, self))
 
     @discord.ui.button(label="🔄 Atualizar", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
     async def atualizar(self, interaction: discord.Interaction, button: Button):
@@ -953,7 +931,7 @@ class LiveConfigView(View):
         await interaction.message.edit(embed=embed, view=self)
         await interaction.followup.send("✅ Horas de todos os streamers resetadas.", ephemeral=True)
 
-# ---- MODAL CONFIG (APENAS 5 CAMPOS) ----
+# ---- MODAL CONFIG (todos os campos obrigatórios) ----
 class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
     live_canais = TextInput(
         label="IDs dos canais de LIVE (vírgula)",
@@ -967,7 +945,7 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
     )
     cargo_live = TextInput(label="ID cargo ping (live)", required=True)
     cargo_staff = TextInput(label="ID cargo ping (staff)", required=True)
-    cargo_admin = TextInput(label="ID cargo admin (opcional)", required=False, placeholder="Deixe em branco")
+    cargo_admin = TextInput(label="ID cargo administrador", required=True, placeholder="Obrigatório")
 
     def __init__(self, guild_id, parent_view):
         super().__init__(timeout=600)
@@ -986,7 +964,14 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
 
             role_live = int(self.cargo_live.value.strip())
             role_staff = int(self.cargo_staff.value.strip())
-            admin_role = int(self.cargo_admin.value.strip()) if self.cargo_admin.value.strip() else None
+            admin_role = int(self.cargo_admin.value.strip())  # agora obrigatório
+
+            # Verifica se os cargos existem no servidor
+            guild = interaction.guild
+            for role_id in [role_live, role_staff, admin_role]:
+                if not guild.get_role(role_id):
+                    await interaction.followup.send(f"❌ O cargo com ID {role_id} não existe neste servidor.", ephemeral=True)
+                    return
 
             config = dados["lives"]["config"].setdefault(str(self.guild_id), {})
             config["channel_ids_live"] = live_ids
@@ -994,15 +979,13 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
             config["role_live"] = role_live
             config["role_staff"] = role_staff
             config["admin_role"] = admin_role
-            # Mantém os demais campos intactos
-            config["target_guild"] = config.get("target_guild")
+            # Mantém os demais campos
             config["platforms"] = config.get("platforms", {"twitch": True, "youtube": True, "kick": True, "tiktok": True})
             config["painel_channel_id"] = config.get("painel_channel_id")
             config["observacao_padrao"] = config.get("observacao_padrao", "")
 
             await save_config(
                 str(self.guild_id),
-                config["target_guild"],
                 live_ids,
                 staff_ids,
                 role_live,
@@ -1022,63 +1005,20 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
             logger.error(f"Erro ao salvar configuração: {e}", exc_info=True)
             await interaction.followup.send(f"❌ Erro inesperado: {e}", ephemeral=True)
 
-# ---- MODAL PARA SERVIDOR DESTINO E OBSERVAÇÃO ----
-class SetTargetModal(Modal, title="Definir Servidor Destino e Observação"):
-    target_guild = TextInput(
-        label="ID do Servidor Destino (opcional)",
-        placeholder="Deixe em branco para usar este servidor",
-        required=False
-    )
-    observacao_padrao = TextInput(
-        label="Observação padrão para lives",
-        placeholder="Ex: Não se esqueça de seguir!",
-        required=False,
-        style=discord.TextStyle.paragraph
-    )
-
-    def __init__(self, guild_id, parent_view):
-        super().__init__(timeout=600)
-        self.guild_id = guild_id
-        self.parent_view = parent_view
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            target_guild_id = int(self.target_guild.value.strip()) if self.target_guild.value.strip() else None
-            obs = self.observacao_padrao.value.strip() if self.observacao_padrao.value else ""
-
-            config = dados["lives"]["config"].setdefault(str(self.guild_id), {})
-            config["target_guild"] = target_guild_id
-            config["observacao_padrao"] = obs
-            # Mantém os outros campos
-            await save_config(
-                str(self.guild_id),
-                target_guild_id,
-                config.get("channel_ids_live", []),
-                config.get("channel_ids_staff", []),
-                config.get("role_live"),
-                config.get("role_staff"),
-                config.get("admin_role"),
-                config.get("platforms", {"twitch": True, "youtube": True, "kick": True, "tiktok": True}),
-                config.get("painel_channel_id"),
-                obs
-            )
-            await refresh_dados()
-            embed = await self.parent_view.build_embed()
-            await interaction.message.edit(embed=embed, view=self.parent_view)
-            await interaction.followup.send("✅ Servidor destino e observação atualizados!", ephemeral=True)
-        except ValueError:
-            await interaction.followup.send("❌ ID do servidor deve ser um número.", ephemeral=True)
-        except Exception as e:
-            logger.error(f"Erro ao salvar target: {e}", exc_info=True)
-            await interaction.followup.send(f"❌ Erro inesperado: {e}", ephemeral=True)
-
-# ---- GERENCIAR STREAMERS ----
+# ---- GERENCIAR STREAMERS (com Adicionar Streamer dentro) ----
 class ConfigStreamersView(View):
     def __init__(self, guild_id, parent_view):
         super().__init__(timeout=None)
         self.guild_id = guild_id
         self.parent_view = parent_view
+
+    @discord.ui.button(label="➕ Adicionar Streamer", style=discord.ButtonStyle.success, emoji="➕", row=0)
+    async def adicionar(self, interaction: discord.Interaction, button: Button):
+        # Verifica se o usuário tem permissão
+        if not is_admin(interaction.user, self.guild_id):
+            await interaction.response.send_message("Permissão negada.", ephemeral=True)
+            return
+        await interaction.response.send_modal(AddStreamerByLinkModal(self.guild_id, self.parent_view))
 
     @discord.ui.button(label="🗑️ Remover", style=discord.ButtonStyle.danger, emoji="🗑️", row=0)
     async def remove(self, interaction: discord.Interaction, button: Button):
@@ -1135,7 +1075,7 @@ class StreamerRemoveDropdown(Select):
         except:
             pass
 
-# ---- ADICIONAR STREAMER (COM RESOLUÇÃO DO YOUTUBE) ----
+# ---- ADICIONAR STREAMER ----
 class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
     plataforma = TextInput(
         label="PLATAFORMA (twitch/youtube/kick/tiktok)",
@@ -1177,7 +1117,7 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
                 identifier = username_input
                 nome_streamer = identifier
 
-            # ----- CORREÇÃO: resolve o channel ID do YouTube no cadastro -----
+            # Resolve YouTube channel ID
             if platform == "youtube":
                 if not identifier.startswith("UC"):
                     channel_id = await get_youtube_channel_id(identifier)
@@ -1254,13 +1194,10 @@ async def live_check_loop():
     for guild_id_str in dados["lives"]["config"]:
         config = dados["lives"]["config"][guild_id_str]
         
-        target_guild_id = config.get("target_guild")
-        if target_guild_id:
-            guild = bot.get_guild(target_guild_id)
-        else:
-            guild = bot.get_guild(int(guild_id_str))
+        # Usa o próprio servidor (target_guild ignorado)
+        guild = bot.get_guild(int(guild_id_str))
         if not guild:
-            logger.warning(f"Servidor não encontrado para guild_id {guild_id_str} (target: {target_guild_id})")
+            logger.warning(f"Servidor não encontrado para guild_id {guild_id_str}")
             continue
 
         channel_ids_live = config.get("channel_ids_live", [])
@@ -1593,45 +1530,7 @@ async def live_check_loop():
 async def before_live_check():
     await bot.wait_until_ready()
 
-# ========= COMANDOS DE TEXTO =========
-@bot.command(name="painel_lives")
-async def cmd_painel_lives(ctx):
-    if not is_admin(ctx.author, ctx.guild.id):
-        await ctx.send("❌ Você não tem permissão para usar este comando.", delete_after=5)
-        return
-    view = LiveConfigView(ctx.guild.id, page=0)
-    embed = await view.build_embed()
-    await ctx.send(embed=embed, view=view)
-
-@bot.command(name="live_status")
-async def cmd_live_status(ctx):
-    guild_id = str(ctx.guild.id)
-    streamers = dados["lives"]["streamers"].get(guild_id, {})
-    if not streamers:
-        await ctx.send("Nenhum streamer cadastrado.")
-        return
-    embed = discord.Embed(title="📡 STATUS DOS STREAMERS", color=0x00ff00)
-    for uid, data in streamers.items():
-        nome = data.get("nome", uid)
-        status_list = []
-        for p in ["twitch", "youtube", "kick", "tiktok"]:
-            if data.get(p):
-                online = dados["lives"]["status"].get(guild_id, {}).get(uid, {}).get(p, False)
-                emoji = "🟢" if online else "🔴"
-                status_list.append(f"{emoji} {p.capitalize()}")
-        if status_list:
-            embed.add_field(name=nome, value=" ".join(status_list), inline=False)
-    await ctx.send(embed=embed)
-
-@bot.command(name="refresh_lives")
-async def cmd_refresh_lives(ctx):
-    if not is_admin(ctx.author, ctx.guild.id):
-        await ctx.send("❌ Sem permissão.", delete_after=5)
-        return
-    await refresh_dados()
-    await ctx.send("✅ Dados atualizados!")
-
-# ========= COMANDO SLASH =========
+# ========= COMANDOS (apenas slash) =========
 @bot.tree.command(name="setpainel", description="Define o canal onde o painel de lives será exibido.")
 @app_commands.default_permissions(administrator=True)
 async def setpainel(interaction: discord.Interaction, canal: discord.TextChannel):
@@ -1640,7 +1539,6 @@ async def setpainel(interaction: discord.Interaction, canal: discord.TextChannel
     config["painel_channel_id"] = canal.id
     await save_config(
         guild_id,
-        config.get("target_guild"),
         config.get("channel_ids_live", []),
         config.get("channel_ids_staff", []),
         config.get("role_live"),
