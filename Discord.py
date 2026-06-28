@@ -886,7 +886,7 @@ class LiveConfigView(View):
         else:
             await interaction.response.send_message("Você já está na última página.", ephemeral=True)
 
-    @discord.ui.button(label="📝 Configurar Canais/Cargos", style=discord.ButtonStyle.secondary, emoji="📝", row=0)
+    @discord.ui.button(label="Configurar Canais/Cargos", style=discord.ButtonStyle.secondary, row=0)  # Emoji removido
     async def set_channels(self, interaction: discord.Interaction, button: Button):
         if not is_admin(interaction.user, self.guild_id):
             await interaction.response.send_message("Você não tem permissão para isso.", ephemeral=True)
@@ -898,7 +898,7 @@ class LiveConfigView(View):
             logger.error(f"Erro ao abrir modal: {e}", exc_info=True)
             await interaction.response.send_message(f"❌ Erro ao abrir o formulário: {e}", ephemeral=True)
 
-    @discord.ui.button(label="⚙️ Gerenciar Streamers", style=discord.ButtonStyle.secondary, emoji="⚙️", row=1)
+    @discord.ui.button(label="Gerenciar Streamers", style=discord.ButtonStyle.secondary, row=1)  # Emoji removido
     async def gerenciar(self, interaction: discord.Interaction, button: Button):
         if not is_admin(interaction.user, self.guild_id):
             await interaction.response.send_message("Permissão negada.", ephemeral=True)
@@ -919,7 +919,7 @@ class LiveConfigView(View):
         embed = await self.build_embed()
         await interaction.message.edit(embed=embed, view=self)
 
-    @discord.ui.button(label="⏱️ Resetar Horas", style=discord.ButtonStyle.primary, emoji="⏱️", row=2)
+    @discord.ui.button(label="Resetar Horas", style=discord.ButtonStyle.primary, row=2)  # Emoji removido
     async def resetar_horas(self, interaction: discord.Interaction, button: Button):
         if not is_admin(interaction.user, self.guild_id):
             await interaction.response.send_message("Sem permissão.", ephemeral=True)
