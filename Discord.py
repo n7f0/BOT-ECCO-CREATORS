@@ -12,16 +12,21 @@ import re
 import cloudscraper
 from fake_useragent import UserAgent
 import asyncpg
+import logging
+
+# ========= CONFIGURAÇÕES DE LOG =========
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
 
 # ========= CONFIGURAÇÕES =========
 TOKEN = os.getenv("DISCORD_TOKEN_LIVE")
 if not TOKEN:
-    print("ERRO: Token do Discord não encontrado (DISCORD_TOKEN_LIVE).")
+    logger.error("Token do Discord não encontrado (DISCORD_TOKEN_LIVE).")
     sys.exit(1)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    print("ERRO: Variável DATABASE_URL não encontrada (banco PostgreSQL no Railway).")
+    logger.error("Variável DATABASE_URL não encontrada (banco PostgreSQL no Railway).")
     sys.exit(1)
 
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
@@ -129,7 +134,7 @@ async def init_db():
                 END IF;
             END $$;
         """)
-        print("✅ Banco de dados PostgreSQL inicializado.")
+        logger.info("Banco de dados PostgreSQL inicializado.")
 
 async def load_all_data():
     dados = {
@@ -370,6 +375,8 @@ def get_headers():
         "Accept-Language": "en-US,en;q=0.9",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Referer": "https://www.google.com/",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache"
     }
 
 # ========= VERIFICAÇÃO DE LIVES =========
@@ -383,16 +390,22 @@ async def get_twitch_token():
     if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
         return None
     async with aiohttp.ClientSession() as session:
-        async with session.post("https://id.twitch.tv/oauth2/token",
-                                params={"client_id": TWITCH_CLIENT_ID,
-                                        "client_secret": TWITCH_CLIENT_SECRET,
-                                        "grant_type": "client_credentials"}) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                twitch_token = data["access_token"]
-                twitch_token_expiry = datetime.utcnow().timestamp() + data["expires_in"] - 60
-                return twitch_token
-    return None
+        try:
+            async with session.post("https://id.twitch.tv/oauth2/token",
+                                    params={"client_id": TWITCH_CLIENT_ID,
+                                            "client_secret": TWITCH_CLIENT_SECRET,
+                                            "grant_type": "client_credentials"}) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    twitch_token = data["access_token"]
+                    twitch_token_expiry = datetime.utcnow().timestamp() + data["expires_in"] - 60
+                    return twitch_token
+                else:
+                    logger.error(f"Falha ao obter token Twitch: {resp.status}")
+                    return None
+        except Exception as e:
+            logger.error(f"Exceção ao obter token Twitch: {e}")
+            return None
 
 async def check_twitch_lives(streamers):
     token = await get_twitch_token()
@@ -404,11 +417,17 @@ async def check_twitch_lives(streamers):
     headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"}
     url = "https://api.twitch.tv/helix/streams?user_login=" + "&user_login=".join(usernames)
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return {s["user_login"].lower(): s for s in data.get("data", [])}
-    return {}
+        try:
+            async with session.get(url, headers=headers, timeout=15) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return {s["user_login"].lower(): s for s in data.get("data", [])}
+                else:
+                    logger.warning(f"Twitch API retornou {resp.status}")
+                    return {}
+        except Exception as e:
+            logger.error(f"Erro ao verificar Twitch: {e}")
+            return {}
 
 async def check_youtube_lives(streamers):
     if not YOUTUBE_API_KEY:
@@ -419,58 +438,70 @@ async def check_youtube_lives(streamers):
             continue
         url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&channelId={ch_id}&eventType=live&type=video&key={YOUTUBE_API_KEY}"
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    for item in data.get("items", []):
-                        live_data[ch_id] = item
+            try:
+                async with session.get(url, timeout=15) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for item in data.get("items", []):
+                            live_data[ch_id] = item
+                    else:
+                        logger.warning(f"YouTube API retornou {resp.status} para {ch_id}")
+            except Exception as e:
+                logger.error(f"Erro ao verificar YouTube para {ch_id}: {e}")
     return live_data
 
-def check_kick_live_sync(username):
+def check_kick_live_sync(username, retries=2):
     scraper = cloudscraper.create_scraper()
     url = f"https://kick.com/api/v2/channels/{username}"
     headers = get_headers()
-    try:
-        resp = scraper.get(url, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            livestream = data.get("livestream")
-            if livestream:
-                return True, {
-                    "title": livestream.get("session_title", "Sem título"),
-                    "viewer_count": livestream.get("viewer_count", 0)
-                }
+    for attempt in range(retries):
+        try:
+            resp = scraper.get(url, headers=headers, timeout=20)
+            if resp.status_code == 200:
+                data = resp.json()
+                livestream = data.get("livestream")
+                if livestream:
+                    return True, {
+                        "title": livestream.get("session_title", "Sem título"),
+                        "viewer_count": livestream.get("viewer_count", 0)
+                    }
+                else:
+                    return False, None
             else:
-                return False, None
-        else:
-            return False, None
-    except Exception as e:
-        print(f"Erro Kick {username}: {e}")
-        return False, None
+                logger.warning(f"Kick retornou {resp.status_code} para {username}, tentativa {attempt+1}")
+        except Exception as e:
+            logger.warning(f"Erro Kick {username} (tentativa {attempt+1}): {e}")
+            if attempt == retries - 1:
+                logger.error(f"Falha ao verificar Kick para {username} após {retries} tentativas")
+    return False, None
 
 async def check_kick_live(username):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, check_kick_live_sync, username)
 
-def check_tiktok_live_sync(username):
+def check_tiktok_live_sync(username, retries=2):
     scraper = cloudscraper.create_scraper()
     url = f"https://www.tiktok.com/@{username}/live"
     headers = get_headers()
-    try:
-        resp = scraper.get(url, headers=headers, timeout=10)
-        if resp.status_code != 200:
+    for attempt in range(retries):
+        try:
+            resp = scraper.get(url, headers=headers, timeout=20)
+            if resp.status_code != 200:
+                logger.warning(f"TikTok retornou {resp.status_code} para {username}, tentativa {attempt+1}")
+                continue
+            html = resp.text
+            title_match = re.search(r'"title":"(.*?)"', html)
+            title = title_match.group(1).replace('\\u002F', '/').replace('\\u0026', '&') if title_match else "Live"
+            thumb_match = re.search(r'"thumbnail_url":"(.*?)"', html)
+            thumbnail = thumb_match.group(1).replace('\\u002F', '/') if thumb_match else None
+            if "data-e2e=\"live-status\"" in html or "live" in title.lower():
+                return {"title": title, "thumbnail": thumbnail, "url": url}
             return None
-        html = resp.text
-        title_match = re.search(r'"title":"(.*?)"', html)
-        title = title_match.group(1).replace('\\u002F', '/').replace('\\u0026', '&') if title_match else "Live"
-        thumb_match = re.search(r'"thumbnail_url":"(.*?)"', html)
-        thumbnail = thumb_match.group(1).replace('\\u002F', '/') if thumb_match else None
-        if "data-e2e=\"live-status\"" in html or "live" in title.lower():
-            return {"title": title, "thumbnail": thumbnail, "url": url}
-        return None
-    except Exception as e:
-        print(f"Erro TikTok {username}: {e}")
-        return None
+        except Exception as e:
+            logger.warning(f"Erro TikTok {username} (tentativa {attempt+1}): {e}")
+            if attempt == retries - 1:
+                logger.error(f"Falha ao verificar TikTok para {username} após {retries} tentativas")
+    return None
 
 async def check_tiktok_live(username):
     loop = asyncio.get_event_loop()
@@ -484,7 +515,7 @@ async def send_notification(canal, content, embed, view=None):
         else:
             await canal.send(content=content, embed=embed)
     except Exception as e:
-        print(f"Erro ao enviar notificação para {canal.id}: {e}")
+        logger.error(f"Erro ao enviar notificação para {canal.id}: {e}")
 
 async def send_to_channels(guild, channel_ids, role_mention, embed, view=None):
     for cid in channel_ids:
@@ -492,10 +523,10 @@ async def send_to_channels(guild, channel_ids, role_mention, embed, view=None):
         if canal:
             await send_notification(canal, role_mention, embed, view)
 
-# ========= CRIAÇÃO DO BOT (ANTES DAS CLASSES QUE USAM 'bot') =========
+# ========= CRIAÇÃO DO BOT =========
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 
-# ========= CLASSES DO PAINEL (VIEWS E MODAIS) =========
+# ========= CLASSES DO PAINEL =========
 class LiveConfigView(View):
     def __init__(self, guild_id, page=0):
         super().__init__(timeout=None)
@@ -545,16 +576,13 @@ class LiveConfigView(View):
         embed.add_field(name="📝 Observação padrão", value=obs_padrao, inline=False)
         embed.add_field(name="🎮 Plataformas", value=status_plats, inline=True)
 
-        # --- STREAMERS (PAGINADO) ---
         streamers = dados["lives"]["streamers"].get(str(self.guild_id), {})
         if streamers:
-            # Converter para lista para paginação
             items = list(streamers.items())
             total = len(items)
             per_page = 10
             total_pages = max(1, (total + per_page - 1) // per_page)
 
-            # Garantir que a página atual seja válida
             if self.current_page >= total_pages:
                 self.current_page = total_pages - 1
             if self.current_page < 0:
@@ -566,7 +594,8 @@ class LiveConfigView(View):
 
             lista = ""
             for uid, data in page_items:
-                nome = data.get("nome", uid)
+                # Força o uso do nome salvo no banco (nickname) em vez da menção
+                nome_exibicao = data.get("nome", uid)
                 created_at = data.get("created_at")
                 data_str = format_date(created_at) if created_at else "Data desconhecida"
                 total_sec = dados["lives"]["hours"].get(str(self.guild_id), {}).get(uid, 0)
@@ -588,23 +617,20 @@ class LiveConfigView(View):
                         emoji = "🟢" if online else "🔴"
                         plats_list.append(f"{emoji} {p.capitalize()}: {data[p]}")
                 if plats_list:
-                    lista += f"**<@{uid}>** - ⏱️ {horas}\n" + "\n".join(plats_list) + f"\n📅 {data_str}\n\n"
+                    lista += f"**{nome_exibicao}** - ⏱️ {horas}\n" + "\n".join(plats_list) + f"\n📅 {data_str}\n\n"
 
             if lista:
-                # Adicionar campo com os streamers da página
                 embed.add_field(name=f"📋 Streamers Cadastrados (página {self.current_page+1}/{total_pages})",
                                 value=lista[:1024], inline=False)
             else:
                 embed.add_field(name="📋 Streamers", value="Nenhum streamer nesta página.", inline=False)
 
-            # Adicionar rodapé com informações de página
             embed.set_footer(text=f"Página {self.current_page+1} de {total_pages} | Total: {total} streamers")
         else:
             embed.add_field(name="📋 Streamers Cadastrados", value="Nenhum streamer cadastrado.", inline=False)
 
         return embed
 
-    # ---- BOTÕES DE PÁGINA ----
     @discord.ui.button(label="◀️", style=discord.ButtonStyle.secondary, row=2)
     async def previous_page(self, interaction: discord.Interaction, button: Button):
         if not is_admin(interaction.user, self.guild_id):
@@ -622,10 +648,9 @@ class LiveConfigView(View):
         if not is_admin(interaction.user, self.guild_id):
             await interaction.response.send_message("Sem permissão.", ephemeral=True)
             return
-        # Calcular total de páginas
         streamers = dados["lives"]["streamers"].get(str(self.guild_id), {})
         total = len(streamers)
-        total_pages = max(1, (total + 9) // 10)  # 10 por página
+        total_pages = max(1, (total + 9) // 10)
         if self.current_page < total_pages - 1:
             self.current_page += 1
             embed = await self.build_embed()
@@ -633,7 +658,6 @@ class LiveConfigView(View):
         else:
             await interaction.response.send_message("Você já está na última página.", ephemeral=True)
 
-    # ---- BOTÕES ORIGINAIS (ajustados para manter a página) ----
     @discord.ui.button(label="📝 Configurar Canais/Cargos", style=discord.ButtonStyle.secondary, emoji="📝", row=0)
     async def set_channels(self, interaction: discord.Interaction, button: Button):
         if not is_admin(interaction.user, self.guild_id):
@@ -663,7 +687,6 @@ class LiveConfigView(View):
             return
         await interaction.response.defer()
         await refresh_dados()
-        # Resetar para primeira página ao atualizar
         self.current_page = 0
         embed = await self.build_embed()
         await interaction.message.edit(embed=embed, view=self)
@@ -680,7 +703,6 @@ class LiveConfigView(View):
         await interaction.message.edit(embed=embed, view=self)
         await interaction.followup.send("✅ Horas de todos os streamers resetadas.", ephemeral=True)
 
-# ---- MODAL COM CAMPOS SEPARADOS PARA LIVE E STAFF (5 CAMPOS) ----
 class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
     live_canais = TextInput(
         label="IDs dos canais de LIVE (vírgula)",
@@ -743,7 +765,6 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
         except Exception as e:
             await interaction.followup.send(f"Erro: {e}", ephemeral=True)
 
-# ---- Demais classes (ConfigStreamersView, RemoveStreamerSelectView, AddStreamerByLinkModal) ----
 class ConfigStreamersView(View):
     def __init__(self, guild_id, parent_view):
         super().__init__(timeout=None)
@@ -926,7 +947,6 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
         )
         await refresh_dados()
 
-        # Verificar se já está em live e notificar imediatamente
         guild = interaction.guild
         await check_streamer_now(guild_str, uid, guild)
 
@@ -949,7 +969,6 @@ async def check_streamer_now(guild_id_str, uid, guild):
     role_mention = f"<@&{role_live_id}>" if role_live_id and guild.get_role(role_live_id) else ""
     observacao_padrao = config.get("observacao_padrao", "")
 
-    # Twitch
     if plataformas.get("twitch") and streamer_data.get("twitch"):
         twitch_name = streamer_data["twitch"]
         lives = await check_twitch_lives([twitch_name])
@@ -971,7 +990,6 @@ async def check_streamer_now(guild_id_str, uid, guild):
             embed.set_footer(text="Twitch • " + datetime.now().strftime("%H:%M"))
             await send_to_channels(guild, channel_ids_live, role_mention, embed)
 
-    # YouTube
     if plataformas.get("youtube") and streamer_data.get("youtube"):
         yt_ch = streamer_data["youtube"]
         lives = await check_youtube_lives([yt_ch])
@@ -991,7 +1009,6 @@ async def check_streamer_now(guild_id_str, uid, guild):
             embed.set_footer(text="YouTube • " + datetime.now().strftime("%H:%M"))
             await send_to_channels(guild, channel_ids_live, role_mention, embed)
 
-    # Kick
     if plataformas.get("kick") and streamer_data.get("kick"):
         kick_name = streamer_data["kick"]
         is_live, stream_info = await check_kick_live(kick_name)
@@ -1010,7 +1027,6 @@ async def check_streamer_now(guild_id_str, uid, guild):
             embed.set_footer(text="Kick • " + datetime.now().strftime("%H:%M"))
             await send_to_channels(guild, channel_ids_live, role_mention, embed)
 
-    # TikTok
     if plataformas.get("tiktok") and streamer_data.get("tiktok"):
         tiktok_name = streamer_data["tiktok"]
         live_info = await check_tiktok_live(tiktok_name)
@@ -1372,7 +1388,7 @@ async def live_check_loop():
                         embed = await view.build_embed()
                         await painel_channel.send(embed=embed, view=view)
                 except Exception as e:
-                    print(f"Erro ao atualizar painel no canal {painel_channel_id}: {e}")
+                    logger.error(f"Erro ao atualizar painel no canal {painel_channel_id}: {e}")
 
 @live_check_loop.before_loop
 async def before_live_check():
@@ -1447,13 +1463,13 @@ async def on_ready():
     await init_db()
     global dados
     dados = await load_all_data()
-    print(f"✅ Bot de Lives online: {bot.user}")
+    logger.info(f"Bot de Lives online: {bot.user}")
 
     try:
         synced = await bot.tree.sync()
-        print(f"✅ Comandos slash sincronizados: {len(synced)}")
+        logger.info(f"Comandos slash sincronizados: {len(synced)}")
     except Exception as e:
-        print(f"❌ Erro ao sincronizar comandos: {e}")
+        logger.error(f"Erro ao sincronizar comandos: {e}")
 
     if not live_check_loop.is_running():
         live_check_loop.start()
