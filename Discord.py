@@ -13,6 +13,7 @@ import cloudscraper
 from fake_useragent import UserAgent
 import asyncpg
 import logging
+from urllib.parse import quote  # <--- ESSE IMPORT É FUNDAMENTAL
 
 # ========= CONFIGURAÇÕES DE LOG =========
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s')
@@ -412,7 +413,7 @@ async def get_twitch_token():
             logger.error(f"Exceção ao obter token Twitch: {e}")
             return None
 
-# ---------- CORREÇÃO: TWITCH COM PARAMS ----------
+# ---------- CORREÇÃO DEFINITIVA DA TWITCH (com quote) ----------
 async def check_twitch_lives(usernames):
     token = await get_twitch_token()
     if not token:
@@ -422,12 +423,13 @@ async def check_twitch_lives(usernames):
     if not usernames:
         return {}
     headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"}
-    # Usa params em vez de concatenar
-    params = [("user_login", username) for username in usernames]
+    # Codifica cada nome para evitar espaços e caracteres especiais
+    encoded = [quote(u) for u in usernames]
+    url = "https://api.twitch.tv/helix/streams?user_login=" + "&user_login=".join(encoded)
     logger.info(f"Verificando Twitch para {len(usernames)} usuários: {usernames[:5]}...")
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get("https://api.twitch.tv/helix/streams", headers=headers, params=params, timeout=15) as resp:
+            async with session.get(url, headers=headers, timeout=15) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     logger.info(f"Twitch: {len(data.get('data', []))} lives encontradas")
@@ -440,12 +442,11 @@ async def check_twitch_lives(usernames):
             logger.error(f"Erro ao verificar Twitch: {e}")
             return {}
 
-# ---------- CORREÇÃO: YOUTUBE COM RESOLUÇÃO DE HANDLE ----------
+# ---------- CORREÇÃO DO YOUTUBE (resolução de handle) ----------
 async def get_youtube_channel_id(handle: str) -> str | None:
     """Converte um handle (ex: @machida) ou nome de canal em channel ID."""
     if not YOUTUBE_API_KEY:
         return None
-    # Remove @ se presente
     handle = handle.lstrip('@')
     url = "https://www.googleapis.com/youtube/v3/search"
     params = {
@@ -482,7 +483,6 @@ async def check_youtube_lives(identifiers):
     for identifier in identifiers:
         if not identifier:
             continue
-        # Se não começar com UC, tenta resolver o channel ID
         if not identifier.startswith("UC"):
             channel_id = await get_youtube_channel_id(identifier)
             if not channel_id:
@@ -499,7 +499,7 @@ async def check_youtube_lives(identifiers):
                     if resp.status == 200:
                         data = await resp.json()
                         if data.get("items"):
-                            live_data[identifier] = data["items"][0]  # mantém a chave original (handle ou ID)
+                            live_data[identifier] = data["items"][0]
                             logger.info(f"YouTube: live encontrada para {identifier}")
                         else:
                             logger.info(f"YouTube: sem live para {identifier}")
@@ -585,11 +585,6 @@ async def send_to_channels(guild, channel_ids, role_mention, embed, view=None):
 
 # ========= FUNÇÃO AUXILIAR PARA TESTE MANUAL =========
 async def test_streamer_live(guild_id_str, uid, guild):
-    """
-    Verifica se o streamer está ao vivo e envia notificações se estiver.
-    Também atualiza o status e inicia a sessão se estiver ao vivo.
-    Retorna um dicionário com o status de cada plataforma e se alguma notificação foi enviada.
-    """
     config = dados["lives"]["config"].get(guild_id_str, {})
     streamer_data = dados["lives"]["streamers"].get(guild_id_str, {}).get(uid)
     if not streamer_data:
@@ -1115,7 +1110,6 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
 
         # ----- CORREÇÃO: resolve o channel ID do YouTube no cadastro -----
         if platform == "youtube":
-            # Se o identificador não começar com UC, tenta resolver
             if not identifier.startswith("UC"):
                 channel_id = await get_youtube_channel_id(identifier)
                 if channel_id:
@@ -1124,7 +1118,6 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
                 else:
                     await interaction.followup.send("❌ Não foi possível encontrar o canal do YouTube. Verifique o nome/handle.", ephemeral=True)
                     return
-            # Se já for UC, mantém
 
         uid = str(interaction.user.id)
         if self.discord_user.value.strip():
