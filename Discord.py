@@ -13,7 +13,7 @@ import cloudscraper
 from fake_useragent import UserAgent
 import asyncpg
 import logging
-from urllib.parse import quote  # <--- ESSE IMPORT É FUNDAMENTAL
+from urllib.parse import quote
 
 # ========= CONFIGURAÇÕES DE LOG =========
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s')
@@ -413,23 +413,38 @@ async def get_twitch_token():
             logger.error(f"Exceção ao obter token Twitch: {e}")
             return None
 
-# ---------- CORREÇÃO DEFINITIVA DA TWITCH (com quote) ----------
+# ---------- CORREÇÃO DEFINITIVA DA TWITCH (com validação de nomes e params) ----------
 async def check_twitch_lives(usernames):
     token = await get_twitch_token()
     if not token:
         logger.error("Sem token Twitch válido, pulando verificação")
         return {}
-    usernames = [s for s in usernames if s]
-    if not usernames:
+    
+    # Filtra nomes vazios e nomes inválidos (apenas letras, números, underline)
+    valid_usernames = []
+    invalid_usernames = []
+    for u in usernames:
+        if not u:
+            continue
+        if re.match(r'^[a-zA-Z0-9_]+$', u):
+            valid_usernames.append(u)
+        else:
+            invalid_usernames.append(u)
+    
+    if invalid_usernames:
+        logger.warning(f"Nomes de usuário inválidos para Twitch (serão ignorados): {invalid_usernames}")
+    
+    if not valid_usernames:
+        logger.info("Nenhum nome de usuário Twitch válido para verificar")
         return {}
+    
     headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"}
-    # Codifica cada nome para evitar espaços e caracteres especiais
-    encoded = [quote(u) for u in usernames]
-    url = "https://api.twitch.tv/helix/streams?user_login=" + "&user_login=".join(encoded)
-    logger.info(f"Verificando Twitch para {len(usernames)} usuários: {usernames[:5]}...")
+    params = [("user_login", u) for u in valid_usernames]
+    
+    logger.info(f"Verificando Twitch para {len(valid_usernames)} usuários: {valid_usernames[:5]}...")
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, headers=headers, timeout=15) as resp:
+            async with session.get("https://api.twitch.tv/helix/streams", headers=headers, params=params, timeout=15) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     logger.info(f"Twitch: {len(data.get('data', []))} lives encontradas")
