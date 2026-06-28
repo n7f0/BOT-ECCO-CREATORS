@@ -523,25 +523,32 @@ async def send_to_channels(guild, channel_ids, role_mention, embed, view=None):
         if canal:
             await send_notification(canal, role_mention, embed, view)
 
-# ========= FUNÇÃO AUXILIAR PARA TESTE MANUAL =========
+# ========= FUNÇÃO AUXILIAR PARA TESTE MANUAL (MODIFICADA PARA RETORNAR STATUS) =========
 async def test_streamer_live(guild_id_str, uid, guild):
-    """Verifica se o streamer está ao vivo e envia notificação se estiver."""
+    """
+    Verifica se o streamer está ao vivo e envia notificações se estiver.
+    Retorna um dicionário com o status de cada plataforma e se alguma notificação foi enviada.
+    """
     config = dados["lives"]["config"].get(guild_id_str, {})
     streamer_data = dados["lives"]["streamers"].get(guild_id_str, {}).get(uid)
     if not streamer_data:
-        return False
+        return {"erro": "Streamer não encontrado"}
 
     channel_ids_live = config.get("channel_ids_live", [])
     role_live_id = config.get("role_live")
     role_mention = f"<@&{role_live_id}>" if role_live_id and guild.get_role(role_live_id) else ""
     observacao_padrao = config.get("observacao_padrao", "")
+    
+    resultados = {}
     qualquer_online = False
 
     # Twitch
     if streamer_data.get("twitch"):
         twitch_name = streamer_data["twitch"]
         lives = await check_twitch_lives([twitch_name])
-        if twitch_name.lower() in lives:
+        is_live = twitch_name.lower() in lives
+        resultados["twitch"] = is_live
+        if is_live:
             live_info = lives[twitch_name.lower()]
             title = live_info.get("title", "")
             nome = streamer_data.get("nome", twitch_name)
@@ -559,12 +566,16 @@ async def test_streamer_live(guild_id_str, uid, guild):
             embed.set_footer(text="Twitch • " + datetime.now().strftime("%H:%M"))
             await send_to_channels(guild, channel_ids_live, role_mention, embed)
             qualquer_online = True
+    else:
+        resultados["twitch"] = False
 
     # YouTube
     if streamer_data.get("youtube"):
         yt_ch = streamer_data["youtube"]
         lives = await check_youtube_lives([yt_ch])
-        if yt_ch in lives:
+        is_live = yt_ch in lives
+        resultados["youtube"] = is_live
+        if is_live:
             video = lives[yt_ch]
             title = video['snippet']['title']
             video_id = video["id"]["videoId"]
@@ -580,11 +591,14 @@ async def test_streamer_live(guild_id_str, uid, guild):
             embed.set_footer(text="YouTube • " + datetime.now().strftime("%H:%M"))
             await send_to_channels(guild, channel_ids_live, role_mention, embed)
             qualquer_online = True
+    else:
+        resultados["youtube"] = False
 
     # Kick
     if streamer_data.get("kick"):
         kick_name = streamer_data["kick"]
         is_live, stream_info = await check_kick_live(kick_name)
+        resultados["kick"] = is_live
         if is_live:
             title = stream_info.get("title", "")
             nome = streamer_data.get("nome", kick_name)
@@ -600,12 +614,16 @@ async def test_streamer_live(guild_id_str, uid, guild):
             embed.set_footer(text="Kick • " + datetime.now().strftime("%H:%M"))
             await send_to_channels(guild, channel_ids_live, role_mention, embed)
             qualquer_online = True
+    else:
+        resultados["kick"] = False
 
     # TikTok
     if streamer_data.get("tiktok"):
         tiktok_name = streamer_data["tiktok"]
         live_info = await check_tiktok_live(tiktok_name)
-        if live_info:
+        is_live = live_info is not None
+        resultados["tiktok"] = is_live
+        if is_live:
             title = live_info.get("title", "")
             nome = streamer_data.get("nome", tiktok_name)
             obs = streamer_data.get("observacao") or observacao_padrao
@@ -622,8 +640,11 @@ async def test_streamer_live(guild_id_str, uid, guild):
             view.add_item(Button(label="Assistir Agora", style=discord.ButtonStyle.link, url=live_info["url"]))
             await send_to_channels(guild, channel_ids_live, role_mention, embed, view=view)
             qualquer_online = True
+    else:
+        resultados["tiktok"] = False
 
-    return qualquer_online
+    resultados["notificacao_enviada"] = qualquer_online
+    return resultados
 
 # ========= CRIAÇÃO DO BOT =========
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
@@ -887,7 +908,6 @@ class ConfigStreamersView(View):
         self.guild_id = guild_id
         self.parent_view = parent_view
 
-    # Botão "🗑️ Remover" mantido
     @discord.ui.button(label="🗑️ Remover", style=discord.ButtonStyle.danger, emoji="🗑️", row=0)
     async def remove(self, interaction: discord.Interaction, button: Button):
         if not is_admin(interaction.user, self.guild_id):
@@ -901,7 +921,6 @@ class ConfigStreamersView(View):
         view = RemoveStreamerSelectView(self.guild_id, self.parent_view)
         await interaction.followup.send("Selecione o streamer para remover:", view=view, ephemeral=True)
 
-    # Botão "↩️ Voltar" mantido
     @discord.ui.button(label="↩️ Voltar", style=discord.ButtonStyle.secondary, emoji="↩️", row=0)
     async def voltar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer()
@@ -944,7 +963,7 @@ class StreamerRemoveDropdown(Select):
         except:
             pass
 
-# ---- ADICIONAR STREAMER ----
+# ---- ADICIONAR STREAMER (MODIFICADO PARA DAR FEEDBACK) ----
 class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
     plataforma = TextInput(label="PLATAFORMA (twitch/youtube/kick/tiktok)", placeholder="Ex: twitch", required=True)
     username = TextInput(label="USERNAME OU LINK", placeholder="Ex: alanzoka ou https://twitch.tv/alanzoka", required=True)
@@ -1003,10 +1022,30 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
         )
         await refresh_dados()
 
+        # Agora verifica se está ao vivo e envia notificações se for o caso
         guild = interaction.guild
-        await check_streamer_now(guild_str, uid, guild)
+        resultado = await test_streamer_live(guild_str, uid, guild)
 
-        await interaction.followup.send(f"Streamer **{nome_streamer}** adicionado em **{platform}**!", ephemeral=True)
+        # Monta mensagem de feedback
+        if "erro" in resultado:
+            await interaction.followup.send(f"❌ {resultado['erro']}", ephemeral=True)
+            return
+
+        status_texto = []
+        for plat, status in resultado.items():
+            if plat in ["twitch", "youtube", "kick", "tiktok"]:
+                status_texto.append(f"{plat.capitalize()}: {'🟢 Ao vivo' if status else '🔴 Offline'}")
+
+        mensagem = f"✅ Streamer **{nome_streamer}** adicionado em **{platform}**!\n\n**Status atual:**\n" + "\n".join(status_texto)
+
+        if resultado.get("notificacao_enviada"):
+            mensagem += "\n\n📢 **Notificação de live enviada!**"
+        else:
+            mensagem += "\n\n❌ **Nenhuma live ativa no momento.**"
+
+        await interaction.followup.send(mensagem, ephemeral=True)
+
+        # Atualiza o painel
         try:
             embed = await self.parent_view.build_embed()
             await interaction.message.edit(embed=embed, view=self.parent_view)
@@ -1051,21 +1090,29 @@ class TestLiveDropdown(Select):
             await interaction.followup.send("Servidor não encontrado.", ephemeral=True)
             return
 
-        online = await test_streamer_live(str(self.guild_id), uid, guild)
+        resultado = await test_streamer_live(str(self.guild_id), uid, guild)
 
-        if online:
-            await interaction.followup.send(f"✅ Streamer <@{uid}> está ao vivo! Notificação enviada.", ephemeral=True)
+        if "erro" in resultado:
+            await interaction.followup.send(f"❌ {resultado['erro']}", ephemeral=True)
+            return
+
+        status_texto = []
+        for plat, status in resultado.items():
+            if plat in ["twitch", "youtube", "kick", "tiktok"]:
+                status_texto.append(f"{plat.capitalize()}: {'🟢 Ao vivo' if status else '🔴 Offline'}")
+
+        mensagem = f"**Resultado da verificação para <@{uid}>:**\n" + "\n".join(status_texto)
+        if resultado.get("notificacao_enviada"):
+            mensagem += "\n\n📢 **Notificação enviada!**"
         else:
-            await interaction.followup.send(f"❌ Streamer <@{uid}> não está ao vivo em nenhuma plataforma ativa.", ephemeral=True)
+            mensagem += "\n\n❌ **Nenhuma live ativa.**"
+
+        await interaction.followup.send(mensagem, ephemeral=True)
 
         try:
             await interaction.edit_original_response(content="Teste concluído.", embed=None, view=None)
         except Exception as e:
             logger.warning(f"Não foi possível editar a mensagem original: {e}")
-
-# ---- FUNÇÃO PARA VERIFICAÇÃO IMEDIATA APÓS ADIÇÃO ----
-async def check_streamer_now(guild_id_str, uid, guild):
-    await test_streamer_live(guild_id_str, uid, guild)
 
 # ========= TASK DE VERIFICAÇÃO =========
 @tasks.loop(minutes=1)
