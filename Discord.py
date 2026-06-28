@@ -432,7 +432,7 @@ async def check_twitch_lives(usernames):
             invalid_usernames.append(u)
     
     if invalid_usernames:
-        logger.warning(f"Nomes de usuário inválidos para Twitch (serão ignorados): {invalid_usernames}")
+        logger.debug(f"Nomes de usuário inválidos para Twitch (serão ignorados): {invalid_usernames}")  # mudado para DEBUG
     
     if not valid_usernames:
         logger.info("Nenhum nome de usuário Twitch válido para verificar")
@@ -904,7 +904,19 @@ class LiveConfigView(View):
             logger.error(f"Erro ao abrir modal: {e}", exc_info=True)
             await interaction.response.send_message(f"❌ Erro ao abrir o formulário: {e}", ephemeral=True)
 
-    @discord.ui.button(label="⚙️ Gerenciar Streamers", style=discord.ButtonStyle.secondary, emoji="⚙️", row=0)
+    @discord.ui.button(label="🎯 Definir Servidor Destino", style=discord.ButtonStyle.primary, emoji="🎯", row=0)
+    async def set_target(self, interaction: discord.Interaction, button: Button):
+        if not is_admin(interaction.user, self.guild_id):
+            await interaction.response.send_message("Você não tem permissão para isso.", ephemeral=True)
+            return
+        try:
+            modal = SetTargetModal(self.guild_id, self)
+            await interaction.response.send_modal(modal)
+        except Exception as e:
+            logger.error(f"Erro ao abrir modal: {e}", exc_info=True)
+            await interaction.response.send_message(f"❌ Erro ao abrir o formulário: {e}", ephemeral=True)
+
+    @discord.ui.button(label="⚙️ Gerenciar Streamers", style=discord.ButtonStyle.secondary, emoji="⚙️", row=1)
     async def gerenciar(self, interaction: discord.Interaction, button: Button):
         if not is_admin(interaction.user, self.guild_id):
             await interaction.response.send_message("Permissão negada.", ephemeral=True)
@@ -929,7 +941,7 @@ class LiveConfigView(View):
         embed = await self.build_embed()
         await interaction.message.edit(embed=embed, view=self)
 
-    @discord.ui.button(label="⏱️ Resetar Horas", style=discord.ButtonStyle.primary, emoji="⏱️", row=1)
+    @discord.ui.button(label="⏱️ Resetar Horas", style=discord.ButtonStyle.primary, emoji="⏱️", row=2)
     async def resetar_horas(self, interaction: discord.Interaction, button: Button):
         if not is_admin(interaction.user, self.guild_id):
             await interaction.response.send_message("Sem permissão.", ephemeral=True)
@@ -941,20 +953,7 @@ class LiveConfigView(View):
         await interaction.message.edit(embed=embed, view=self)
         await interaction.followup.send("✅ Horas de todos os streamers resetadas.", ephemeral=True)
 
-    @discord.ui.button(label="🔍 Testar Live", style=discord.ButtonStyle.primary, emoji="🔍", row=2)
-    async def testar_live(self, interaction: discord.Interaction, button: Button):
-        if not is_admin(interaction.user, self.guild_id):
-            await interaction.response.send_message("Sem permissão.", ephemeral=True)
-            return
-        streamers = dados["lives"]["streamers"].get(str(self.guild_id), {})
-        if not streamers:
-            await interaction.response.send_message("Nenhum streamer cadastrado.", ephemeral=True)
-            return
-        view = TestLiveSelectView(self.guild_id, self)
-        embed = discord.Embed(title="🔍 Selecione um streamer para testar", color=0x7289da)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-# ---- MODAL CONFIG (CORRIGIDO COM TIMEOUT E TRATAMENTO DE ERRO) ----
+# ---- MODAL CONFIG (APENAS 5 CAMPOS) ----
 class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
     live_canais = TextInput(
         label="IDs dos canais de LIVE (vírgula)",
@@ -969,14 +968,9 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
     cargo_live = TextInput(label="ID cargo ping (live)", required=True)
     cargo_staff = TextInput(label="ID cargo ping (staff)", required=True)
     cargo_admin = TextInput(label="ID cargo admin (opcional)", required=False, placeholder="Deixe em branco")
-    target_guild = TextInput(
-        label="ID do Servidor Destino (opcional)",
-        placeholder="Deixe em branco para usar este servidor",
-        required=False
-    )
 
     def __init__(self, guild_id, parent_view):
-        super().__init__(timeout=600)  # 10 minutos para preencher
+        super().__init__(timeout=600)
         self.guild_id = guild_id
         self.parent_view = parent_view
 
@@ -993,7 +987,6 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
             role_live = int(self.cargo_live.value.strip())
             role_staff = int(self.cargo_staff.value.strip())
             admin_role = int(self.cargo_admin.value.strip()) if self.cargo_admin.value.strip() else None
-            target_guild_id = int(self.target_guild.value.strip()) if self.target_guild.value.strip() else None
 
             config = dados["lives"]["config"].setdefault(str(self.guild_id), {})
             config["channel_ids_live"] = live_ids
@@ -1001,13 +994,15 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
             config["role_live"] = role_live
             config["role_staff"] = role_staff
             config["admin_role"] = admin_role
-            config["target_guild"] = target_guild_id
-            if "platforms" not in config:
-                config["platforms"] = {"twitch": True, "youtube": True, "kick": True, "tiktok": True}
+            # Mantém os demais campos intactos
+            config["target_guild"] = config.get("target_guild")
+            config["platforms"] = config.get("platforms", {"twitch": True, "youtube": True, "kick": True, "tiktok": True})
+            config["painel_channel_id"] = config.get("painel_channel_id")
+            config["observacao_padrao"] = config.get("observacao_padrao", "")
 
             await save_config(
                 str(self.guild_id),
-                target_guild_id,
+                config["target_guild"],
                 live_ids,
                 staff_ids,
                 role_live,
@@ -1025,6 +1020,57 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
             await interaction.followup.send(f"❌ Erro ao converter IDs: {ve}. Certifique-se de que os campos de ID contenham apenas números.", ephemeral=True)
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ Erro inesperado: {e}", ephemeral=True)
+
+# ---- MODAL PARA SERVIDOR DESTINO E OBSERVAÇÃO ----
+class SetTargetModal(Modal, title="Definir Servidor Destino e Observação"):
+    target_guild = TextInput(
+        label="ID do Servidor Destino (opcional)",
+        placeholder="Deixe em branco para usar este servidor",
+        required=False
+    )
+    observacao_padrao = TextInput(
+        label="Observação padrão para lives",
+        placeholder="Ex: Não se esqueça de seguir!",
+        required=False,
+        style=discord.TextStyle.paragraph
+    )
+
+    def __init__(self, guild_id, parent_view):
+        super().__init__(timeout=600)
+        self.guild_id = guild_id
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            target_guild_id = int(self.target_guild.value.strip()) if self.target_guild.value.strip() else None
+            obs = self.observacao_padrao.value.strip() if self.observacao_padrao.value else ""
+
+            config = dados["lives"]["config"].setdefault(str(self.guild_id), {})
+            config["target_guild"] = target_guild_id
+            config["observacao_padrao"] = obs
+            # Mantém os outros campos
+            await save_config(
+                str(self.guild_id),
+                target_guild_id,
+                config.get("channel_ids_live", []),
+                config.get("channel_ids_staff", []),
+                config.get("role_live"),
+                config.get("role_staff"),
+                config.get("admin_role"),
+                config.get("platforms", {"twitch": True, "youtube": True, "kick": True, "tiktok": True}),
+                config.get("painel_channel_id"),
+                obs
+            )
+            await refresh_dados()
+            embed = await self.parent_view.build_embed()
+            await interaction.message.edit(embed=embed, view=self.parent_view)
+            await interaction.followup.send("✅ Servidor destino e observação atualizados!", ephemeral=True)
+        except ValueError:
+            await interaction.followup.send("❌ ID do servidor deve ser um número.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Erro ao salvar target: {e}", exc_info=True)
             await interaction.followup.send(f"❌ Erro inesperado: {e}", ephemeral=True)
 
 # ---- GERENCIAR STREAMERS ----
@@ -1199,68 +1245,6 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
         except Exception as e:
             logger.error(f"Erro ao adicionar streamer: {e}", exc_info=True)
             await interaction.followup.send(f"❌ Erro inesperado: {e}", ephemeral=True)
-
-# ---- VIEW PARA SELECIONAR STREAMER NO TESTE ----
-class TestLiveSelectView(View):
-    def __init__(self, guild_id, parent_view):
-        super().__init__(timeout=120)
-        self.guild_id = guild_id
-        self.parent_view = parent_view
-        streamers = dados["lives"]["streamers"].get(str(guild_id), {})
-        options = []
-        for uid, data in streamers.items():
-            nome = data.get("nome", uid)
-            plats = [p.capitalize() for p in ["twitch", "youtube", "kick", "tiktok"] if data.get(p)]
-            desc = f"{nome} ({', '.join(plats)})" if plats else nome
-            options.append(discord.SelectOption(label=desc[:100], value=uid))
-        if len(options) > 25:
-            options = options[:25]
-        if options:
-            self.add_item(TestLiveDropdown(options, guild_id, parent_view))
-        else:
-            self.add_item(Button(label="Voltar", style=discord.ButtonStyle.secondary, custom_id="voltar_teste"))
-
-    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary, row=1)
-    async def cancelar(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.edit_message(content="Teste cancelado.", embed=None, view=None)
-
-class TestLiveDropdown(Select):
-    def __init__(self, options, guild_id, parent_view):
-        super().__init__(placeholder="Escolha um streamer para testar...", options=options)
-        self.guild_id = guild_id
-        self.parent_view = parent_view
-
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        uid = self.values[0]
-        guild = interaction.guild
-        if not guild:
-            await interaction.followup.send("Servidor não encontrado.", ephemeral=True)
-            return
-
-        resultado = await test_streamer_live(str(self.guild_id), uid, guild)
-
-        if "erro" in resultado:
-            await interaction.followup.send(f"❌ {resultado['erro']}", ephemeral=True)
-            return
-
-        status_texto = []
-        for plat, status in resultado.items():
-            if plat in ["twitch", "youtube", "kick", "tiktok"]:
-                status_texto.append(f"{plat.capitalize()}: {'🟢 Ao vivo' if status else '🔴 Offline'}")
-
-        mensagem = f"**Resultado da verificação para <@{uid}>:**\n" + "\n".join(status_texto)
-        if resultado.get("notificacao_enviada"):
-            mensagem += "\n\n📢 **Notificação enviada!**"
-        else:
-            mensagem += "\n\n❌ **Nenhuma live ativa.**"
-
-        await interaction.followup.send(mensagem, ephemeral=True)
-
-        try:
-            await interaction.edit_original_response(content="Teste concluído.", embed=None, view=None)
-        except Exception as e:
-            logger.warning(f"Não foi possível editar a mensagem original: {e}")
 
 # ========= TASK DE VERIFICAÇÃO =========
 @tasks.loop(minutes=1)
