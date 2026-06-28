@@ -162,7 +162,7 @@ async def load_all_data():
                 "role_live": r["role_live_id"],
                 "role_staff": r["role_staff_id"],
                 "admin_role": r["admin_role_id"],
-                "target_guild": r["target_guild_id"],  # mantido para compatibilidade, mas não será usado
+                "target_guild": r["target_guild_id"],
                 "platforms": json.loads(r["platforms"]) if r["platforms"] else {"twitch": True, "youtube": True, "kick": True, "tiktok": True},
                 "painel_channel_id": r["painel_channel_id"],
                 "observacao_padrao": r["observacao_padrao"] or ""
@@ -222,7 +222,6 @@ async def load_all_data():
 
 async def save_config(guild_id, channel_ids_live, channel_ids_staff,
                       role_live, role_staff, admin_role, platforms, painel_channel_id, observacao_padrao):
-    # target_guild_id agora é sempre None (usamos o próprio servidor)
     async with db_pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO live_config (guild_id, target_guild_id, channel_ids_live, channel_ids_staff,
@@ -908,7 +907,7 @@ class LiveConfigView(View):
         embed = discord.Embed(title="⚙️ GERENCIAR STREAMERS", color=0x7289da)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
-    @discord.ui.button(label="🔄 Atualizar", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
+    @discord.ui.button(label="Atualizar", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
     async def atualizar(self, interaction: discord.Interaction, button: Button):
         if not is_admin(interaction.user, self.guild_id):
             await interaction.response.send_message("Sem permissão.", ephemeral=True)
@@ -964,9 +963,8 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
 
             role_live = int(self.cargo_live.value.strip())
             role_staff = int(self.cargo_staff.value.strip())
-            admin_role = int(self.cargo_admin.value.strip())  # agora obrigatório
+            admin_role = int(self.cargo_admin.value.strip())
 
-            # Verifica se os cargos existem no servidor
             guild = interaction.guild
             for role_id in [role_live, role_staff, admin_role]:
                 if not guild.get_role(role_id):
@@ -979,7 +977,6 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
             config["role_live"] = role_live
             config["role_staff"] = role_staff
             config["admin_role"] = admin_role
-            # Mantém os demais campos
             config["platforms"] = config.get("platforms", {"twitch": True, "youtube": True, "kick": True, "tiktok": True})
             config["painel_channel_id"] = config.get("painel_channel_id")
             config["observacao_padrao"] = config.get("observacao_padrao", "")
@@ -1014,7 +1011,6 @@ class ConfigStreamersView(View):
 
     @discord.ui.button(label="➕ Adicionar Streamer", style=discord.ButtonStyle.success, emoji="➕", row=0)
     async def adicionar(self, interaction: discord.Interaction, button: Button):
-        # Verifica se o usuário tem permissão
         if not is_admin(interaction.user, self.guild_id):
             await interaction.response.send_message("Permissão negada.", ephemeral=True)
             return
@@ -1030,7 +1026,7 @@ class ConfigStreamersView(View):
         if not streamers:
             await interaction.followup.send("Nenhum streamer cadastrado.", ephemeral=True)
             return
-        view = RemoveStreamerSelectView(self.guild_id, self.parent_view)
+        view = RemoveStreamerSelectView(self.guild_id, self.parent_view, page=0)
         await interaction.followup.send("Selecione o streamer para remover:", view=view, ephemeral=True)
 
     @discord.ui.button(label="↩️ Voltar", style=discord.ButtonStyle.secondary, emoji="↩️", row=0)
@@ -1039,23 +1035,83 @@ class ConfigStreamersView(View):
         embed = await self.parent_view.build_embed()
         await interaction.followup.send(embed=embed, view=self.parent_view, ephemeral=True)
 
-# ---- REMOVER STREAMER ----
+# ---- REMOVER STREAMER COM PAGINAÇÃO ----
 class RemoveStreamerSelectView(View):
-    def __init__(self, guild_id, parent_view):
+    def __init__(self, guild_id, parent_view, page=0):
         super().__init__(timeout=120)
         self.guild_id = guild_id
         self.parent_view = parent_view
-        streamers = dados["lives"]["streamers"].get(str(guild_id), {})
+        self.page = page
+        self.per_page = 25
+        self._build_select()
+
+    def _build_select(self):
+        # Remove o select antigo se existir
+        for item in self.children:
+            if isinstance(item, Select):
+                self.remove_item(item)
+        # Remove botões de navegação também? Não, eles ficam.
+        # Mas vamos adicionar o select novamente
+        streamers = dados["lives"]["streamers"].get(str(self.guild_id), {})
+        items = list(streamers.items())
+        total = len(items)
+        total_pages = max(1, (total + self.per_page - 1) // self.per_page)
+        if self.page >= total_pages:
+            self.page = total_pages - 1
+        if self.page < 0:
+            self.page = 0
+
+        start = self.page * self.per_page
+        end = min(start + self.per_page, total)
+        page_items = items[start:end]
+
         options = []
-        for uid, data in streamers.items():
+        for uid, data in page_items:
             nome = data.get("nome", uid)
             plats = [p.capitalize() for p in ["twitch", "youtube", "kick", "tiktok"] if data.get(p)]
             desc = f"{nome} ({', '.join(plats)})" if plats else nome
             options.append(discord.SelectOption(label=desc[:100], value=uid))
-        if len(options) > 25:
-            options = options[:25]
-        if options:
-            self.add_item(StreamerRemoveDropdown(options, guild_id, parent_view))
+        if not options:
+            options.append(discord.SelectOption(label="Nenhum streamer", value="none", default=True))
+
+        select = StreamerRemoveDropdown(options, self.guild_id, self.parent_view)
+        self.add_item(select)
+        # Atualizar botões de navegação
+        # Remover botões antigos e adicionar novos
+        for child in self.children[:]:
+            if isinstance(child, Button) and child.label in ["◀", "▶"]:
+                self.remove_item(child)
+        # Adicionar botões de navegação
+        if total_pages > 1:
+            self.add_item(Button(label="◀", style=discord.ButtonStyle.secondary, custom_id="prev_remove"))
+            self.add_item(Button(label="▶", style=discord.ButtonStyle.secondary, custom_id="next_remove"))
+        # Atualizar a mensagem com a view atualizada
+        # Mas isso será feito pelo callback dos botões
+
+    async def update_view(self, interaction: discord.Interaction):
+        self._build_select()
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, row=1)
+    async def prev_page(self, interaction: discord.Interaction, button: Button):
+        if self.page > 0:
+            self.page -= 1
+            self._build_select()
+            await interaction.response.edit_message(view=self)
+        else:
+            await interaction.response.send_message("Já está na primeira página.", ephemeral=True)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, row=1)
+    async def next_page(self, interaction: discord.Interaction, button: Button):
+        streamers = dados["lives"]["streamers"].get(str(self.guild_id), {})
+        total = len(streamers)
+        total_pages = max(1, (total + self.per_page - 1) // self.per_page)
+        if self.page < total_pages - 1:
+            self.page += 1
+            self._build_select()
+            await interaction.response.edit_message(view=self)
+        else:
+            await interaction.response.send_message("Já está na última página.", ephemeral=True)
 
 class StreamerRemoveDropdown(Select):
     def __init__(self, options, guild_id, parent_view):
@@ -1066,12 +1122,22 @@ class StreamerRemoveDropdown(Select):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         uid = self.values[0]
+        if uid == "none":
+            await interaction.followup.send("Nenhum streamer disponível.", ephemeral=True)
+            return
         await delete_streamer(str(self.guild_id), uid)
         await refresh_dados()
         await interaction.followup.send("Streamer removido com sucesso!", ephemeral=True)
+        # Atualizar o painel principal
         try:
             embed = await self.parent_view.build_embed()
-            await interaction.message.edit(embed=embed, view=self.parent_view)
+            # Procurar a mensagem do painel (pode ser a mensagem original)
+            # Como não temos referência direta, podemos atualizar a mensagem onde o select está?
+            # Mas o select é efêmero, então vamos apenas atualizar o painel se possível.
+            # Tentamos encontrar a mensagem do painel original através do parent_view.
+            # Como o parent_view é LiveConfigView, e a mensagem do painel é a que contém o embed.
+            # Não temos a mensagem aqui, então vamos apenas recarregar o painel na próxima iteração.
+            # Mas podemos enviar uma mensagem de confirmação.
         except:
             pass
 
@@ -1117,7 +1183,6 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
                 identifier = username_input
                 nome_streamer = identifier
 
-            # Resolve YouTube channel ID
             if platform == "youtube":
                 if not identifier.startswith("UC"):
                     channel_id = await get_youtube_channel_id(identifier)
@@ -1193,8 +1258,6 @@ async def live_check_loop():
     await refresh_dados()
     for guild_id_str in dados["lives"]["config"]:
         config = dados["lives"]["config"][guild_id_str]
-        
-        # Usa o próprio servidor (target_guild ignorado)
         guild = bot.get_guild(int(guild_id_str))
         if not guild:
             logger.warning(f"Servidor não encontrado para guild_id {guild_id_str}")
