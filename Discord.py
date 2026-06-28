@@ -523,7 +523,7 @@ async def send_to_channels(guild, channel_ids, role_mention, embed, view=None):
         if canal:
             await send_notification(canal, role_mention, embed, view)
 
-# ========= FUNÇÃO AUXILIAR PARA TESTE MANUAL (MODIFICADA PARA RETORNAR STATUS) =========
+# ========= FUNÇÃO AUXILIAR PARA TESTE MANUAL =========
 async def test_streamer_live(guild_id_str, uid, guild):
     """
     Verifica se o streamer está ao vivo e envia notificações se estiver.
@@ -901,7 +901,7 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
         except Exception as e:
             await interaction.followup.send(f"Erro: {e}", ephemeral=True)
 
-# ---- GERENCIAR STREAMERS (MODIFICADO) ----
+# ---- GERENCIAR STREAMERS ----
 class ConfigStreamersView(View):
     def __init__(self, guild_id, parent_view):
         super().__init__(timeout=None)
@@ -963,12 +963,28 @@ class StreamerRemoveDropdown(Select):
         except:
             pass
 
-# ---- ADICIONAR STREAMER (MODIFICADO PARA DAR FEEDBACK) ----
+# ---- ADICIONAR STREAMER (COM CAMPO OBRIGATÓRIO "ID DO SERVIDOR") ----
 class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
-    plataforma = TextInput(label="PLATAFORMA (twitch/youtube/kick/tiktok)", placeholder="Ex: twitch", required=True)
-    username = TextInput(label="USERNAME OU LINK", placeholder="Ex: alanzoka ou https://twitch.tv/alanzoka", required=True)
-    discord_user = TextInput(label="DISCORD DO STREAMER (opcional)", placeholder="ID ou @", required=False)
-    observacao = TextInput(label="OBSERVAÇÃO (opcional)", placeholder="Mensagem personalizada", required=False)
+    plataforma = TextInput(
+        label="PLATAFORMA (twitch/youtube/kick/tiktok)",
+        placeholder="Ex: twitch",
+        required=True
+    )
+    username = TextInput(
+        label="USERNAME OU LINK",
+        placeholder="Ex: alanzoka ou https://twitch.tv/alanzoka",
+        required=True
+    )
+    discord_user = TextInput(
+        label="DISCORD DO STREAMER (opcional)",
+        placeholder="ID ou @",
+        required=False
+    )
+    id_servidor = TextInput(
+        label="ID DO SERVIDOR (obrigatório)",
+        placeholder="Digite o ID do servidor onde o streamer será vinculado",
+        required=True
+    )
 
     def __init__(self, guild_id, parent_view):
         super().__init__()
@@ -979,7 +995,14 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
         await interaction.response.defer(ephemeral=True, thinking=True)
         plat_input = self.plataforma.value.strip().lower()
         username_input = self.username.value.strip()
-        obs = self.observacao.value.strip()
+        id_servidor = self.id_servidor.value.strip()
+
+        # Valida se o ID do servidor é um número
+        try:
+            int(id_servidor)
+        except ValueError:
+            await interaction.followup.send("❌ O ID do servidor deve ser um número válido.", ephemeral=True)
+            return
 
         extracted_plat, extracted_id = extract_platform_from_url(username_input)
         if extracted_plat and extracted_id:
@@ -1018,7 +1041,7 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
             youtube=current.get("youtube") if platform != "youtube" else identifier,
             kick=current.get("kick") if platform != "kick" else identifier,
             tiktok=current.get("tiktok") if platform != "tiktok" else identifier,
-            observacao=obs or current.get("observacao", "")
+            observacao=id_servidor  # Armazena o ID do servidor no campo observacao
         )
         await refresh_dados()
 
@@ -1036,7 +1059,9 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
             if plat in ["twitch", "youtube", "kick", "tiktok"]:
                 status_texto.append(f"{plat.capitalize()}: {'🟢 Ao vivo' if status else '🔴 Offline'}")
 
-        mensagem = f"✅ Streamer **{nome_streamer}** adicionado em **{platform}**!\n\n**Status atual:**\n" + "\n".join(status_texto)
+        mensagem = f"✅ Streamer **{nome_streamer}** adicionado em **{platform}**!\n" \
+                   f"🆔 Servidor vinculado: `{id_servidor}`\n\n" \
+                   f"**Status atual:**\n" + "\n".join(status_texto)
 
         if resultado.get("notificacao_enviada"):
             mensagem += "\n\n📢 **Notificação de live enviada!**"
@@ -1130,7 +1155,7 @@ async def live_check_loop():
         if not guild:
             continue
 
-        # Plataformas agora são sempre ativas (não usamos mais o campo 'platforms' para decidir)
+        # Plataformas agora são sempre ativas
         channel_ids_live = config.get("channel_ids_live", [])
         channel_ids_staff = config.get("channel_ids_staff", [])
         role_live_id = config.get("role_live")
@@ -1143,7 +1168,7 @@ async def live_check_loop():
         status_server = dados["lives"]["status"].setdefault(guild_id_str, {})
         sessions_server = dados["lives"]["sessions"].setdefault(guild_id_str, {})
 
-        # ---- TWITCH (sempre ativo) ----
+        # ---- TWITCH ----
         twitch_users = [data.get("twitch") for data in streamers_dict.values() if data.get("twitch")]
         lives = await check_twitch_lives(twitch_users)
         for uid, data in streamers_dict.items():
@@ -1217,7 +1242,7 @@ async def live_check_loop():
                     if uid in sessions_server and "twitch" in sessions_server[uid]:
                         del sessions_server[uid]["twitch"]
 
-        # ---- YOUTUBE (sempre ativo) ----
+        # ---- YOUTUBE ----
         yt_users = [data.get("youtube") for data in streamers_dict.values() if data.get("youtube")]
         lives = await check_youtube_lives(yt_users)
         for uid, data in streamers_dict.items():
@@ -1288,7 +1313,7 @@ async def live_check_loop():
                     if uid in sessions_server and "youtube" in sessions_server[uid]:
                         del sessions_server[uid]["youtube"]
 
-        # ---- KICK (sempre ativo) ----
+        # ---- KICK ----
         for uid, data in streamers_dict.items():
             kick_name = data.get("kick")
             if not kick_name:
@@ -1359,7 +1384,7 @@ async def live_check_loop():
                     if uid in sessions_server and "kick" in sessions_server[uid]:
                         del sessions_server[uid]["kick"]
 
-        # ---- TIKTOK (sempre ativo) ----
+        # ---- TIKTOK ----
         for uid, data in streamers_dict.items():
             tiktok_name = data.get("tiktok")
             if not tiktok_name:
@@ -1528,9 +1553,10 @@ async def on_ready():
     dados = await load_all_data()
     logger.info(f"Bot de Lives online: {bot.user}")
 
+    # Sincronização global (pode causar rate limit, mas é tolerável)
     try:
         synced = await bot.tree.sync()
-        logger.info(f"Comandos slash sincronizados: {len(synced)}")
+        logger.info(f"Comandos slash sincronizados globalmente: {len(synced)}")
     except Exception as e:
         logger.error(f"Erro ao sincronizar comandos: {e}")
 
