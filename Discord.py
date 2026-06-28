@@ -268,12 +268,6 @@ async def save_last_notified(key, value):
             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
         """, key, value)
 
-# =====================================================================
-# FIX #1: save_status, save_session, delete_session, add_streamer_hours
-# agora também atualizam o dados em memória, garantindo que a bolinha
-# verde e as horas apareçam corretamente no painel imediatamente.
-# =====================================================================
-
 async def save_status(guild_id, user_id, platform, is_live):
     async with db_pool.acquire() as conn:
         await conn.execute("""
@@ -281,7 +275,6 @@ async def save_status(guild_id, user_id, platform, is_live):
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (guild_id, user_id, platform) DO UPDATE SET is_live = EXCLUDED.is_live
         """, guild_id, user_id, platform, is_live)
-    # Atualiza em memória imediatamente
     if dados:
         dados["lives"]["status"].setdefault(guild_id, {}).setdefault(user_id, {})[platform] = is_live
 
@@ -294,7 +287,6 @@ async def save_session(guild_id, user_id, platform, start_time, last_milestone_h
                 start_time = EXCLUDED.start_time,
                 last_milestone_hours = EXCLUDED.last_milestone_hours
         """, guild_id, user_id, platform, start_time, last_milestone_hours)
-    # Atualiza em memória imediatamente para que as horas apareçam no painel
     if dados:
         if start_time.tzinfo is None:
             start_time = start_time.replace(tzinfo=timezone.utc)
@@ -309,7 +301,6 @@ async def update_milestone(guild_id, user_id, platform, milestone_hours):
             UPDATE live_sessions SET last_milestone_hours = $1
             WHERE guild_id = $2 AND user_id = $3 AND platform = $4
         """, milestone_hours, guild_id, user_id, platform)
-    # Atualiza em memória
     if dados:
         sess = dados["lives"]["sessions"].get(guild_id, {}).get(user_id, {}).get(platform)
         if sess:
@@ -318,7 +309,6 @@ async def update_milestone(guild_id, user_id, platform, milestone_hours):
 async def delete_session(guild_id, user_id, platform):
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM live_sessions WHERE guild_id=$1 AND user_id=$2 AND platform=$3", guild_id, user_id, platform)
-    # Atualiza em memória
     if dados:
         try:
             dados["lives"]["sessions"].get(guild_id, {}).get(user_id, {}).pop(platform, None)
@@ -333,7 +323,6 @@ async def add_streamer_hours(guild_id, user_id, seconds):
             ON CONFLICT (guild_id, user_id) DO UPDATE SET
                 total_seconds = live_hours.total_seconds + EXCLUDED.total_seconds
         """, guild_id, user_id, seconds)
-    # Atualiza em memória
     if dados:
         current = dados["lives"]["hours"].get(guild_id, {}).get(user_id, 0)
         dados["lives"]["hours"].setdefault(guild_id, {})[user_id] = current + seconds
@@ -626,7 +615,7 @@ async def send_to_channels(guild, channel_ids, role_mention, embed, view=None):
         if canal:
             await send_notification(canal, role_mention, embed, view)
 
-# ========= FUNÇÃO AUXILIAR PARA TESTE MANUAL (usada ao adicionar) =========
+# ========= FUNÇÃO AUXILIAR PARA TESTE MANUAL =========
 async def test_streamer_live(guild_id_str, uid, guild):
     config = dados["lives"]["config"].get(guild_id_str, {})
     streamer_data = dados["lives"]["streamers"].get(guild_id_str, {}).get(uid)
@@ -854,7 +843,13 @@ class LiveConfigView(View):
 
             lista = ""
             for uid, data in page_items:
-                nome_exibicao = f"<@{uid}>"
+                nome_db = data.get("nome", uid)
+                # Garante que o formato de menção (@) com ID e o nome sempre apareçam claramente.
+                if uid.isdigit():
+                    nome_exibicao = f"<@{uid}> (`{nome_db}`)"
+                else:
+                    nome_exibicao = f"**{nome_db}**"
+                    
                 created_at = data.get("created_at")
                 data_str = format_date(created_at) if created_at else "Data desconhecida"
                 total_sec = dados["lives"]["hours"].get(str(self.guild_id), {}).get(uid, 0)
@@ -939,8 +934,6 @@ class LiveConfigView(View):
         embed = discord.Embed(title="⚙️ GERENCIAR STREAMERS", color=0x7289da)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
-    # FIX #2: Removido o parâmetro emoji="🔄" duplicado — o emoji agora
-    # está apenas no label, evitando que apareçam dois ícones no botão.
     @discord.ui.button(label="🔄 Atualizar", style=discord.ButtonStyle.secondary, row=1)
     async def atualizar(self, interaction: discord.Interaction, button: Button):
         if not is_admin(interaction.user, self.guild_id):
@@ -1031,7 +1024,7 @@ class SetChannelsModal(Modal, title="Configurar Canais e Cargos"):
             await interaction.message.edit(embed=embed, view=self.parent_view)
             await interaction.followup.send("✅ Configuração salva!", ephemeral=True)
         except ValueError as ve:
-            await interaction.followup.send(f"❌ Erro ao converter IDs: {ve}. Certifique-se de que os campos de ID contenham apenas números.", ephemeral=True)
+            await interaction.followup.send(f"❌ Erro ao converter IDs: {ve}. Certifique-se de que os campos contenham apenas números.", ephemeral=True)
         except Exception as e:
             logger.error(f"Erro ao salvar configuração: {e}", exc_info=True)
             await interaction.followup.send(f"❌ Erro inesperado: {e}", ephemeral=True)
@@ -1043,7 +1036,6 @@ class ConfigStreamersView(View):
         self.guild_id = guild_id
         self.parent_view = parent_view
 
-    # FIX #3: Removido emoji="➕" duplicado — o emoji já está no label.
     @discord.ui.button(label="➕ Adicionar Streamer", style=discord.ButtonStyle.success, row=0)
     async def adicionar(self, interaction: discord.Interaction, button: Button):
         if not is_admin(interaction.user, self.guild_id):
@@ -1051,15 +1043,12 @@ class ConfigStreamersView(View):
             return
         await interaction.response.send_modal(AddStreamerByLinkModal(self.guild_id, self.parent_view))
 
-    # FIX #3: Removido emoji="🗑️" duplicado — o emoji já está no label.
-    # FIX #4: Adicionado refresh_dados() para garantir que TODOS os streamers apareçam.
     @discord.ui.button(label="🗑️ Remover", style=discord.ButtonStyle.danger, row=0)
     async def remove(self, interaction: discord.Interaction, button: Button):
         if not is_admin(interaction.user, self.guild_id):
             await interaction.response.send_message("Permissão negada.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        # Força atualização dos dados para garantir que todos os streamers apareçam
         await refresh_dados()
         streamers = dados["lives"]["streamers"].get(str(self.guild_id), {})
         if not streamers:
@@ -1073,7 +1062,6 @@ class ConfigStreamersView(View):
             ephemeral=True
         )
 
-    # FIX #3: Removido emoji="↩️" duplicado — o emoji já está no label.
     @discord.ui.button(label="↩️ Voltar", style=discord.ButtonStyle.secondary, row=0)
     async def voltar(self, interaction: discord.Interaction, button: Button):
         await interaction.response.defer()
@@ -1081,19 +1069,7 @@ class ConfigStreamersView(View):
         await interaction.followup.send(embed=embed, view=self.parent_view, ephemeral=True)
 
 
-# =====================================================================
-# FIX #4: RemoveStreamerSelectView completamente reescrita.
-# Problemas originais:
-#   - _build_select() removia os botões decorados de navegação,
-#     deixando os botões "◀"/"▶" sem callback (não faziam nada).
-#   - Sem refresh_dados(), streamers recém-adicionados não apareciam.
-# Solução:
-#   - Usa clear_items() + _rebuild() para controle total dos itens.
-#   - PrevPageButton / NextPageButton têm callbacks corretos.
-# =====================================================================
-
 class PrevPageButton(Button):
-    """Botão de página anterior para o seletor de remoção."""
     def __init__(self, remove_view: "RemoveStreamerSelectView"):
         super().__init__(label="◀ Anterior", style=discord.ButtonStyle.secondary, row=1)
         self.remove_view = remove_view
@@ -1108,7 +1084,6 @@ class PrevPageButton(Button):
 
 
 class NextPageButton(Button):
-    """Botão de próxima página para o seletor de remoção."""
     def __init__(self, remove_view: "RemoveStreamerSelectView"):
         super().__init__(label="Próxima ▶", style=discord.ButtonStyle.secondary, row=1)
         self.remove_view = remove_view
@@ -1133,7 +1108,6 @@ class RemoveStreamerSelectView(View):
         self._rebuild()
 
     def _rebuild(self):
-        """Remove todos os itens e reconstrói o select + botões de navegação."""
         self.clear_items()
 
         streamers = dados["lives"]["streamers"].get(str(self.guild_id), {})
@@ -1141,7 +1115,6 @@ class RemoveStreamerSelectView(View):
         total = len(items)
         self.total_pages = max(1, (total + self.per_page - 1) // self.per_page)
 
-        # Ajusta página se necessário
         if self.page >= self.total_pages:
             self.page = self.total_pages - 1
         if self.page < 0:
@@ -1155,17 +1128,22 @@ class RemoveStreamerSelectView(View):
         for uid, data in page_items:
             nome = data.get("nome", uid)
             plats = [p.capitalize() for p in ["twitch", "youtube", "kick", "tiktok"] if data.get(p)]
-            desc = f"{nome} ({', '.join(plats)})" if plats else nome
-            options.append(discord.SelectOption(label=desc[:100], value=uid))
+            desc_plats = f"Plataformas: {', '.join(plats)}" if plats else "Nenhuma plataforma vinculada"
+            
+            # Mostra explicitamente no select quem é a pessoa, incluindo ID se houver
+            if uid.isdigit():
+                label_text = f"👤 {nome} (ID/Conta Vinculada)"
+            else:
+                label_text = f"👤 {nome} (Adicionado manualmente)"
+                
+            options.append(discord.SelectOption(label=label_text[:100], description=desc_plats[:100], value=uid))
 
         if not options:
             options.append(discord.SelectOption(label="Nenhum streamer", value="none", default=True))
 
-        # Adiciona o Select (ocupa row=0)
         select = StreamerRemoveDropdown(options, self.guild_id, self.parent_view)
         self.add_item(select)
 
-        # Adiciona botões de navegação apenas se necessário (row=1)
         if self.total_pages > 1:
             self.add_item(PrevPageButton(self))
             self.add_item(NextPageButton(self))
@@ -1187,16 +1165,13 @@ class StreamerRemoveDropdown(Select):
         if uid == "none":
             await interaction.followup.send("Nenhum streamer disponível.", ephemeral=True)
             return
-        # Pega o nome antes de deletar
         streamer_data = dados["lives"]["streamers"].get(str(self.guild_id), {}).get(uid, {})
         nome = streamer_data.get("nome", uid)
         await delete_streamer(str(self.guild_id), uid)
         await refresh_dados()
         await interaction.followup.send(f"✅ Streamer **{nome}** removido com sucesso!", ephemeral=True)
-        # Atualiza o painel principal
         try:
             embed = await self.parent_view.build_embed()
-            # Tenta editar a mensagem do painel se acessível
         except Exception:
             pass
 
@@ -1215,7 +1190,7 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
     )
     discord_user = TextInput(
         label="DISCORD DO STREAMER (opcional)",
-        placeholder="ID ou @",
+        placeholder="ID Numérico ou @ (Menção)",
         required=False
     )
 
@@ -1254,15 +1229,31 @@ class AddStreamerByLinkModal(Modal, title="Adicionar Streamer"):
                         return
 
             uid = str(interaction.user.id)
-            if self.discord_user.value.strip():
-                try:
-                    uid_str = self.discord_user.value.strip().replace("<@!", "").replace("<@", "").replace(">", "")
-                    uid = str(int(uid_str))
+            discord_input = self.discord_user.value.strip()
+            
+            # Tratamento blindado para ID: Evita que administradores sobrescrevam IDs acidentalmente 
+            # digitando nomes soltos ou menções quebradas ao invés de IDs válidos.
+            if discord_input:
+                # Extrai apenas os números da entrada, ignorando "texto", "@" e etc
+                extracted_uid = re.sub(r"\D", "", discord_input)
+                if extracted_uid:
+                    uid = extracted_uid
                     member = interaction.guild.get_member(int(uid))
                     if member:
                         nome_streamer = member.display_name
-                except:
-                    pass
+                    else:
+                        # Tenta buscar pelo banco global de usuários do bot caso ele já tenha saído do servidor
+                        try:
+                            user_obj = await interaction.client.fetch_user(int(uid))
+                            nome_streamer = user_obj.display_name
+                        except:
+                            pass 
+                else:
+                    # O Administrador digitou texto puro sem nenhum número. 
+                    # Criamos um ID virtual para evitar sobrescrever a conta dele próprio.
+                    if is_admin(interaction.user, self.guild_id):
+                        uid = f"user_{discord_input}"
+                        nome_streamer = discord_input
 
             if not is_admin(interaction.user, self.guild_id) and uid != str(interaction.user.id):
                 await interaction.followup.send("Você só pode adicionar seu próprio canal.", ephemeral=True)
@@ -1358,7 +1349,6 @@ async def live_check_loop():
                     dados["lives"]["last_notified"][last_key] = stream_id
                     await save_last_notified(last_key, stream_id)
                     now_utc = datetime.now(timezone.utc)
-                    # save_session também atualiza dados em memória (FIX #1)
                     await save_session(guild_id_str, uid, "twitch", now_utc, 0)
                     sessions_server.setdefault(uid, {})["twitch"] = {
                         "start_time": now_utc,
