@@ -577,18 +577,48 @@ def check_tiktok_live_sync(username, retries=2):
     headers = get_headers()
     for attempt in range(retries):
         try:
-            resp = scraper.get(url, headers=headers, timeout=20)
+            resp = scraper.get(url, headers=headers, timeout=20, allow_redirects=True)
             if resp.status_code != 200:
                 logger.warning(f"TikTok retornou {resp.status_code} para {username}, tentativa {attempt+1}")
                 continue
+
+            # Quando o usuário NÃO está ao vivo, o TikTok redireciona para o perfil,
+            # removendo o "/live" da URL final.
+            final_url = str(resp.url)
+            if "/live" not in final_url:
+                logger.info(f"TikTok: {username} não está ao vivo (redirecionado para {final_url})")
+                return None
+
             html = resp.text
-            title_match = re.search(r'"title":"(.*?)"', html)
-            title = title_match.group(1).replace('\\u002F', '/').replace('\\u0026', '&') if title_match else "Live"
-            thumb_match = re.search(r'"thumbnail_url":"(.*?)"', html)
-            thumbnail = thumb_match.group(1).replace('\\u002F', '/') if thumb_match else None
-            if "data-e2e=\"live-status\"" in html or "live" in title.lower():
-                return {"title": title, "thumbnail": thumbnail, "url": url}
-            return None
+
+            # Markers confiáveis presentes no JSON da página apenas quando há live ativa.
+            # NÃO usar "live" no título, pois gera falsos positivos.
+            live_markers = [
+                '"liveRoomInfo"',
+                '"isLiving":true',
+                '"status":2',
+                '"liveRoomUserInfo"',
+                '"roomId"',
+                '"LIVE_STREAMING"',
+            ]
+            is_live = any(marker in html for marker in live_markers)
+
+            if not is_live:
+                logger.info(f"TikTok: nenhum marcador de live encontrado para {username}")
+                return None
+
+            title_match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
+            if title_match:
+                title = title_match.group(1)
+                title = title.replace('\\u002F', '/').replace('\\u0026', '&').replace('\\"', '"')
+            else:
+                title = "Live"
+
+            thumb_match = re.search(r'"thumbnail_url"\s*:\s*"([^"]*)"', html)
+            thumbnail = thumb_match.group(1).replace('\\/', '/') if thumb_match else None
+
+            logger.info(f"TikTok: {username} está ao vivo! Título: {title}")
+            return {"title": title, "thumbnail": thumbnail, "url": url}
         except Exception as e:
             logger.warning(f"Erro TikTok {username} (tentativa {attempt+1}): {e}")
             if attempt == retries - 1:
@@ -1543,7 +1573,9 @@ async def live_check_loop():
                             embed.set_footer(text="Kick • " + datetime.now().strftime("%H:%M"))
                             await send_to_channels(guild, channel_ids_staff, role_staff_mention, embed)
             else:
-                if status_server.get(uid, {}).get("kick", False):
+                # Usa last_notified para verificar se estava ao vivo antes.
+                # status_server já foi atualizado para False acima, por isso não serve aqui.
+                if dados["lives"]["last_notified"].get(f"kick_{uid}") == "live":
                     dados["lives"]["last_notified"][f"kick_{uid}"] = "offline"
                     await save_last_notified(f"kick_{uid}", "offline")
                 sess = sessions_server.get(uid, {}).get("kick")
@@ -1622,7 +1654,9 @@ async def live_check_loop():
                             view.add_item(Button(label="Assistir Agora", style=discord.ButtonStyle.link, url=live_info["url"]))
                             await send_to_channels(guild, channel_ids_staff, role_staff_mention, embed, view=view)
             else:
-                if status_server.get(uid, {}).get("tiktok", False):
+                # Usa last_notified para verificar se estava ao vivo antes.
+                # status_server já foi atualizado para False acima, por isso não serve aqui.
+                if dados["lives"]["last_notified"].get(f"tiktok_{uid}") == "live":
                     dados["lives"]["last_notified"][f"tiktok_{uid}"] = "offline"
                     await save_last_notified(f"tiktok_{uid}", "offline")
                 sess = sessions_server.get(uid, {}).get("tiktok")
