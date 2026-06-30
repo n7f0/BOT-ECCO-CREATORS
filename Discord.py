@@ -102,7 +102,7 @@ async def init_db():
                 PRIMARY KEY (guild_id, user_id)
             )
         """)
-        # Nova tabela para controle de cooldown da notificação de "início de live"
+        # Tabela de cooldown para notificações de "início de live"
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS live_notification_cooldown (
                 guild_id TEXT,
@@ -155,7 +155,7 @@ async def load_all_data():
             "status": {},
             "sessions": {},
             "hours": {},
-            "cooldown": {}  # novo campo
+            "cooldown": {}
         }
     }
     async with db_pool.acquire() as conn:
@@ -353,7 +353,7 @@ async def reset_streamer_hours(guild_id, user_id=None):
         else:
             await conn.execute("UPDATE live_hours SET total_seconds = 0 WHERE guild_id = $1", guild_id)
 
-# --- Funções para cooldown de notificação de "início de live" ---
+# --- Cooldown para notificação de "início de live" ---
 COOLDOWN_HOURS = 3
 
 async def get_last_live_notification(guild_id, user_id):
@@ -366,7 +366,6 @@ async def get_last_live_notification(guild_id, user_id):
             ts = row["last_sent"]
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
-            # atualizar cache
             dados["lives"]["cooldown"].setdefault(guild_id, {})[user_id] = ts
             return ts
     return None
@@ -465,7 +464,6 @@ twitch_token_expiry = 0
 async def get_twitch_token():
     global twitch_token, twitch_token_expiry
     if twitch_token and datetime.now(timezone.utc).timestamp() < twitch_token_expiry:
-        logger.info("Usando token Twitch em cache")
         return twitch_token
     if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
         logger.error("TWITCH_CLIENT_ID ou TWITCH_CLIENT_SECRET não configurados")
@@ -511,13 +509,11 @@ async def check_twitch_lives(usernames):
         logger.debug(f"Nomes de usuário inválidos para Twitch (serão ignorados): {invalid_usernames}")
     
     if not valid_usernames:
-        logger.info("Nenhum nome de usuário Twitch válido para verificar")
         return {}
     
     headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"}
     params = [("user_login", u) for u in valid_usernames]
     
-    logger.info(f"Verificando Twitch para {len(valid_usernames)} usuários: {valid_usernames[:5]}...")
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get("https://api.twitch.tv/helix/streams", headers=headers, params=params, timeout=15) as resp:
@@ -581,7 +577,6 @@ async def check_youtube_lives(identifiers):
             channel_id = identifier
 
         url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&channelId={channel_id}&eventType=live&type=video&key={YOUTUBE_API_KEY}"
-        logger.info(f"Verificando YouTube para canal: {channel_id}")
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(url, timeout=15) as resp:
@@ -645,7 +640,6 @@ def check_tiktok_live_sync(username, retries=2):
                 return None
 
             html = resp.text
-
             live_markers = [
                 '"liveRoomInfo"',
                 '"isLiving":true',
@@ -726,12 +720,13 @@ async def test_streamer_live(guild_id_str, uid, guild):
             last_key = f"twitch_{uid}"
             last_id = dados["lives"]["last_notified"].get(last_key)
             stream_id = live_info["id"]
-            if last_id != stream_id and await can_send_live_notification(guild_id_str, uid):
+            # Usa cooldown como condição principal (independente do ID)
+            if await can_send_live_notification(guild_id_str, uid):
                 dados["lives"]["last_notified"][last_key] = stream_id
                 await save_last_notified(last_key, stream_id)
                 now_utc = datetime.now(timezone.utc)
                 await save_session(guild_id_str, uid, "twitch", now_utc, 0)
-                await update_live_notification(guild_id_str, uid)  # cooldown
+                await update_live_notification(guild_id_str, uid)
                 nome = streamer_data.get("nome", twitch_name)
                 obs = streamer_data.get("observacao") or observacao_padrao
                 embed = discord.Embed(title="🔴 LIVE NA TWITCH", color=0x9146ff)
@@ -746,8 +741,10 @@ async def test_streamer_live(guild_id_str, uid, guild):
                     embed.set_image(url=thumb_url)
                 embed.set_footer(text="Twitch • " + datetime.now().strftime("%H:%M"))
                 await send_to_channels(guild, channel_ids_live, role_mention, embed)
+                logger.info(f"Notificação Twitch enviada para {nome} (cooldown aplicado)")
                 qualquer_online = True
             else:
+                logger.info(f"Twitch: notificação bloqueada por cooldown para {uid}")
                 qualquer_online = True
     else:
         resultados["twitch"] = False
@@ -765,12 +762,12 @@ async def test_streamer_live(guild_id_str, uid, guild):
             video_id = video["id"]["videoId"]
             last_key = f"yt_{uid}"
             last_id = dados["lives"]["last_notified"].get(last_key)
-            if last_id != video_id and await can_send_live_notification(guild_id_str, uid):
+            if await can_send_live_notification(guild_id_str, uid):
                 dados["lives"]["last_notified"][last_key] = video_id
                 await save_last_notified(last_key, video_id)
                 now_utc = datetime.now(timezone.utc)
                 await save_session(guild_id_str, uid, "youtube", now_utc, 0)
-                await update_live_notification(guild_id_str, uid)  # cooldown
+                await update_live_notification(guild_id_str, uid)
                 nome = streamer_data.get("nome", yt_identifier)
                 obs = streamer_data.get("observacao") or observacao_padrao
                 embed = discord.Embed(title="🔴 LIVE NO YOUTUBE", color=0xff0000)
@@ -782,8 +779,10 @@ async def test_streamer_live(guild_id_str, uid, guild):
                 embed.add_field(name="Link", value=f"https://youtube.com/watch?v={video_id}", inline=False)
                 embed.set_footer(text="YouTube • " + datetime.now().strftime("%H:%M"))
                 await send_to_channels(guild, channel_ids_live, role_mention, embed)
+                logger.info(f"Notificação YouTube enviada para {nome} (cooldown aplicado)")
                 qualquer_online = True
             else:
+                logger.info(f"YouTube: notificação bloqueada por cooldown para {uid}")
                 qualquer_online = True
     else:
         resultados["youtube"] = False
@@ -798,12 +797,12 @@ async def test_streamer_live(guild_id_str, uid, guild):
             title = stream_info.get("title", "")
             last_key = f"kick_{uid}"
             last_status = dados["lives"]["last_notified"].get(last_key)
-            if last_status != "live" and await can_send_live_notification(guild_id_str, uid):
+            if await can_send_live_notification(guild_id_str, uid):
                 dados["lives"]["last_notified"][last_key] = "live"
                 await save_last_notified(last_key, "live")
                 now_utc = datetime.now(timezone.utc)
                 await save_session(guild_id_str, uid, "kick", now_utc, 0)
-                await update_live_notification(guild_id_str, uid)  # cooldown
+                await update_live_notification(guild_id_str, uid)
                 nome = streamer_data.get("nome", kick_name)
                 obs = streamer_data.get("observacao") or observacao_padrao
                 embed = discord.Embed(title="🔴 LIVE NA KICK", color=0x53fc18)
@@ -816,8 +815,10 @@ async def test_streamer_live(guild_id_str, uid, guild):
                 embed.add_field(name="Link", value=f"https://kick.com/{kick_name}", inline=False)
                 embed.set_footer(text="Kick • " + datetime.now().strftime("%H:%M"))
                 await send_to_channels(guild, channel_ids_live, role_mention, embed)
+                logger.info(f"Notificação Kick enviada para {nome} (cooldown aplicado)")
                 qualquer_online = True
             else:
+                logger.info(f"Kick: notificação bloqueada por cooldown para {uid}")
                 qualquer_online = True
     else:
         resultados["kick"] = False
@@ -833,12 +834,12 @@ async def test_streamer_live(guild_id_str, uid, guild):
             title = live_info.get("title", "")
             last_key = f"tiktok_{uid}"
             last_status = dados["lives"]["last_notified"].get(last_key)
-            if last_status != "live" and await can_send_live_notification(guild_id_str, uid):
+            if await can_send_live_notification(guild_id_str, uid):
                 dados["lives"]["last_notified"][last_key] = "live"
                 await save_last_notified(last_key, "live")
                 now_utc = datetime.now(timezone.utc)
                 await save_session(guild_id_str, uid, "tiktok", now_utc, 0)
-                await update_live_notification(guild_id_str, uid)  # cooldown
+                await update_live_notification(guild_id_str, uid)
                 nome = streamer_data.get("nome", tiktok_name)
                 obs = streamer_data.get("observacao") or observacao_padrao
                 embed = discord.Embed(title="🔴 LIVE NO TIKTOK", color=0xff0050, url=live_info["url"])
@@ -853,8 +854,10 @@ async def test_streamer_live(guild_id_str, uid, guild):
                 view = View(timeout=None)
                 view.add_item(Button(label="Assistir Agora", style=discord.ButtonStyle.link, url=live_info["url"]))
                 await send_to_channels(guild, channel_ids_live, role_mention, embed, view=view)
+                logger.info(f"Notificação TikTok enviada para {nome} (cooldown aplicado)")
                 qualquer_online = True
             else:
+                logger.info(f"TikTok: notificação bloqueada por cooldown para {uid}")
                 qualquer_online = True
     else:
         resultados["tiktok"] = False
@@ -1424,7 +1427,8 @@ async def live_check_loop():
                 last_id = dados["lives"]["last_notified"].get(last_key)
                 stream_id = live_info["id"]
 
-                if last_id != stream_id and await can_send_live_notification(guild_id_str, uid):
+                # Cooldown como condição principal
+                if await can_send_live_notification(guild_id_str, uid):
                     dados["lives"]["last_notified"][last_key] = stream_id
                     await save_last_notified(last_key, stream_id)
                     now_utc = datetime.now(timezone.utc)
@@ -1449,6 +1453,7 @@ async def live_check_loop():
                         embed.set_image(url=thumb_url)
                     embed.set_footer(text="Twitch • " + datetime.now().strftime("%H:%M"))
                     await send_to_channels(guild, channel_ids_live, role_live_mention, embed)
+                    logger.info(f"Twitch: notificação enviada para {nome} (cooldown aplicado)")
                 else:
                     # Atualiza sessão se já existe
                     sess = sessions_server.get(uid, {}).get("twitch")
@@ -1472,6 +1477,7 @@ async def live_check_loop():
                             embed.add_field(name="Link", value=f"https://twitch.tv/{twitch_name}", inline=False)
                             embed.set_footer(text="Twitch • " + datetime.now().strftime("%H:%M"))
                             await send_to_channels(guild, channel_ids_staff, role_staff_mention, embed)
+                            logger.info(f"Twitch: marco de {current_hour}h enviado para {nome}")
             else:
                 sess = sessions_server.get(uid, {}).get("twitch")
                 if sess:
@@ -1506,7 +1512,7 @@ async def live_check_loop():
                 last_key = f"yt_{uid}"
                 last_id = dados["lives"]["last_notified"].get(last_key)
 
-                if last_id != video_id and await can_send_live_notification(guild_id_str, uid):
+                if await can_send_live_notification(guild_id_str, uid):
                     dados["lives"]["last_notified"][last_key] = video_id
                     await save_last_notified(last_key, video_id)
                     now_utc = datetime.now(timezone.utc)
@@ -1528,6 +1534,7 @@ async def live_check_loop():
                     embed.add_field(name="Link", value=f"https://youtube.com/watch?v={video_id}", inline=False)
                     embed.set_footer(text="YouTube • " + datetime.now().strftime("%H:%M"))
                     await send_to_channels(guild, channel_ids_live, role_live_mention, embed)
+                    logger.info(f"YouTube: notificação enviada para {nome} (cooldown aplicado)")
                 else:
                     sess = sessions_server.get(uid, {}).get("youtube")
                     if sess:
@@ -1550,6 +1557,7 @@ async def live_check_loop():
                             embed.add_field(name="Link", value=f"https://youtube.com/watch?v={video_id}", inline=False)
                             embed.set_footer(text="YouTube • " + datetime.now().strftime("%H:%M"))
                             await send_to_channels(guild, channel_ids_staff, role_staff_mention, embed)
+                            logger.info(f"YouTube: marco de {current_hour}h enviado para {nome}")
             else:
                 sess = sessions_server.get(uid, {}).get("youtube")
                 if sess:
@@ -1580,7 +1588,7 @@ async def live_check_loop():
                 last_key = f"kick_{uid}"
                 last_status = dados["lives"]["last_notified"].get(last_key)
 
-                if last_status != "live" and await can_send_live_notification(guild_id_str, uid):
+                if await can_send_live_notification(guild_id_str, uid):
                     dados["lives"]["last_notified"][last_key] = "live"
                     await save_last_notified(last_key, "live")
                     now_utc = datetime.now(timezone.utc)
@@ -1603,6 +1611,7 @@ async def live_check_loop():
                     embed.add_field(name="Link", value=f"https://kick.com/{kick_name}", inline=False)
                     embed.set_footer(text="Kick • " + datetime.now().strftime("%H:%M"))
                     await send_to_channels(guild, channel_ids_live, role_live_mention, embed)
+                    logger.info(f"Kick: notificação enviada para {nome} (cooldown aplicado)")
                 else:
                     sess = sessions_server.get(uid, {}).get("kick")
                     if sess:
@@ -1625,6 +1634,7 @@ async def live_check_loop():
                             embed.add_field(name="Link", value=f"https://kick.com/{kick_name}", inline=False)
                             embed.set_footer(text="Kick • " + datetime.now().strftime("%H:%M"))
                             await send_to_channels(guild, channel_ids_staff, role_staff_mention, embed)
+                            logger.info(f"Kick: marco de {current_hour}h enviado para {nome}")
             else:
                 if dados["lives"]["last_notified"].get(f"kick_{uid}") == "live":
                     dados["lives"]["last_notified"][f"kick_{uid}"] = "offline"
@@ -1657,7 +1667,7 @@ async def live_check_loop():
                 last_key = f"tiktok_{uid}"
                 last_status = dados["lives"]["last_notified"].get(last_key)
 
-                if last_status != "live" and await can_send_live_notification(guild_id_str, uid):
+                if await can_send_live_notification(guild_id_str, uid):
                     dados["lives"]["last_notified"][last_key] = "live"
                     await save_last_notified(last_key, "live")
                     now_utc = datetime.now(timezone.utc)
@@ -1682,6 +1692,7 @@ async def live_check_loop():
                     view = View(timeout=None)
                     view.add_item(Button(label="Assistir Agora", style=discord.ButtonStyle.link, url=live_info["url"]))
                     await send_to_channels(guild, channel_ids_live, role_live_mention, embed, view=view)
+                    logger.info(f"TikTok: notificação enviada para {nome} (cooldown aplicado)")
                 else:
                     sess = sessions_server.get(uid, {}).get("tiktok")
                     if sess:
@@ -1705,6 +1716,7 @@ async def live_check_loop():
                             view = View(timeout=None)
                             view.add_item(Button(label="Assistir Agora", style=discord.ButtonStyle.link, url=live_info["url"]))
                             await send_to_channels(guild, channel_ids_staff, role_staff_mention, embed, view=view)
+                            logger.info(f"TikTok: marco de {current_hour}h enviado para {nome}")
             else:
                 if dados["lives"]["last_notified"].get(f"tiktok_{uid}") == "live":
                     dados["lives"]["last_notified"][f"tiktok_{uid}"] = "offline"
