@@ -1450,7 +1450,8 @@ async def live_check_loop():
                         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
                         current_hour = int(elapsed // 3600)
                         last_milestone = sess.get("last_milestone_hours", 0)
-                        if current_hour > last_milestone and current_hour >= 1:
+                        # Verifica se atingiu 1 hora, e depois avisa a cada 3 horas (1h, 4h, 7h...)
+                        if current_hour >= 1 and (last_milestone == 0 or (current_hour - last_milestone) >= 3):
                             await update_milestone(guild_id_str, uid, "twitch", current_hour)
                             nome = data.get("nome", twitch_name)
                             obs = data.get("observacao") or observacao_padrao
@@ -1533,7 +1534,8 @@ async def live_check_loop():
                         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
                         current_hour = int(elapsed // 3600)
                         last_milestone = sess.get("last_milestone_hours", 0)
-                        if current_hour > last_milestone and current_hour >= 1:
+                        # Verifica se atingiu 1 hora, e depois avisa a cada 3 horas (1h, 4h, 7h...)
+                        if current_hour >= 1 and (last_milestone == 0 or (current_hour - last_milestone) >= 3):
                             await update_milestone(guild_id_str, uid, "youtube", current_hour)
                             nome = data.get("nome", yt_identifier)
                             obs = data.get("observacao") or observacao_padrao
@@ -1613,7 +1615,8 @@ async def live_check_loop():
                         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
                         current_hour = int(elapsed // 3600)
                         last_milestone = sess.get("last_milestone_hours", 0)
-                        if current_hour > last_milestone and current_hour >= 1:
+                        # Verifica se atingiu 1 hora, e depois avisa a cada 3 horas (1h, 4h, 7h...)
+                        if current_hour >= 1 and (last_milestone == 0 or (current_hour - last_milestone) >= 3):
                             await update_milestone(guild_id_str, uid, "kick", current_hour)
                             nome = data.get("nome", kick_name)
                             obs = data.get("observacao") or observacao_padrao
@@ -1699,7 +1702,8 @@ async def live_check_loop():
                         elapsed = (datetime.now(timezone.utc) - start).total_seconds()
                         current_hour = int(elapsed // 3600)
                         last_milestone = sess.get("last_milestone_hours", 0)
-                        if current_hour > last_milestone and current_hour >= 1:
+                        # Verifica se atingiu 1 hora, e depois avisa a cada 3 horas (1h, 4h, 7h...)
+                        if current_hour >= 1 and (last_milestone == 0 or (current_hour - last_milestone) >= 3):
                             await update_milestone(guild_id_str, uid, "tiktok", current_hour)
                             nome = data.get("nome", tiktok_name)
                             obs = data.get("observacao") or observacao_padrao
