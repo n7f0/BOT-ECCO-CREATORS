@@ -598,67 +598,74 @@ async def check_kick_live(username):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, check_kick_live_sync, username)
 
-def check_tiktok_live_sync(username, retries=2):
-    scraper = cloudscraper.create_scraper()
+def check_tiktok_live_sync(username, retries=3):
+    # Configuração atualizada do scraper para burlar novos bloqueios do TikTok
+    scraper = cloudscraper.create_scraper(browser={
+        'browser': 'chrome',
+        'platform': 'windows',
+        'desktop': True
+    })
     url = f"https://www.tiktok.com/@{username}/live"
-    headers = get_headers()
+    headers = {
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://www.tiktok.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+    
     for attempt in range(retries):
         try:
             resp = scraper.get(url, headers=headers, timeout=20, allow_redirects=True)
-            if resp.status_code != 200:
-                logger.warning(f"TikTok retornou {resp.status_code} para {username}, tentativa {attempt+1}")
-                continue
-
-            # Quando o usuário NÃO está ao vivo, o TikTok redireciona para o perfil,
-            # removendo o "/live" da URL final. Esse é o sinal mais confiável.
+            
+            # 1. Se o TikTok redirecionou para o perfil (tirou o /live da URL final), está offline.
             final_url = str(resp.url)
             if "/live" not in final_url:
-                logger.info(f"TikTok: {username} não está ao vivo (redirecionado para {final_url})")
+                logger.info(f"TikTok: {username} offline (redirecionado para o perfil).")
                 return None
 
             html = resp.text
 
-            # Mesmo quando a URL continua em "/live" (sem redirecionamento), a página
-            # pode mostrar dados residuais da última live encerrada por alguns instantes.
-            # Por isso, sinais explícitos de "encerrado" têm prioridade e derrubam
-            # qualquer outro marcador — evita o bug da "bolinha verde" presa.
+            # 2. Verifica se fomos barrados por uma tela de Captcha/Bloqueio anti-bot
+            if "Verify to continue" in html or 'id="captcha-verify-ui"' in html or "Access Denied" in html:
+                logger.warning(f"TikTok bloqueou a requisição para {username} (Captcha) na tentativa {attempt+1}.")
+                continue
+
+            # 3. Novos marcadores do TikTok indicando que a live encerrou
             ended_markers = [
+                '"status":4', 
                 '"isLiving":false',
-                '"status":4',
-                '"status":3',
+                'LiveRoomInfo":{"status":4',
                 'has ended',
-                'LIVE has ended',
-                'live ended',
+                'LIVE has ended'
             ]
             if any(marker in html for marker in ended_markers):
-                logger.info(f"TikTok: marcador de live encerrada encontrado para {username}")
+                logger.info(f"TikTok: marcador de live encerrada encontrado para {username}.")
                 return None
 
-            # Marcadores positivos: só os mais explícitos e confiáveis contam.
-            # Evita usar campos genéricos como "roomId" ou "LIVE_STREAMING", que
-            # podem permanecer na página mesmo depois que a live terminou.
-            is_live = '"isLiving":true' in html or '"status":2' in html
+            # 4. Novos marcadores do TikTok indicando que a live está ONLINE
+            is_live = '"status":2' in html or '"isLiving":true' in html or 'LiveRoomInfo":{"status":2' in html
 
             if not is_live:
-                logger.info(f"TikTok: nenhum marcador de live ativa encontrado para {username}")
+                logger.info(f"TikTok: nenhum sinal de live ativa para {username}.")
                 return None
 
+            # 5. Extração segura do título
+            title = "Live no TikTok"
             title_match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', html)
             if title_match:
-                title = title_match.group(1)
-                title = title.replace('\\u002F', '/').replace('\\u0026', '&').replace('\\"', '"')
-            else:
-                title = "Live"
+                title = title_match.group(1).replace('\\u002F', '/').replace('\\u0026', '&').replace('\\"', '"')
 
-            thumb_match = re.search(r'"thumbnail_url"\s*:\s*"([^"]*)"', html)
-            thumbnail = thumb_match.group(1).replace('\\/', '/') if thumb_match else None
+            # 6. Extração segura da thumbnail (imagem de capa)
+            thumbnail = None
+            thumb_match = re.search(r'"cover_url"\s*:\s*"([^"]*)"', html) or re.search(r'"thumbnail_url"\s*:\s*"([^"]*)"', html)
+            if thumb_match:
+                thumbnail = thumb_match.group(1).replace('\\u002F', '/').replace('\\/', '/')
 
             logger.info(f"TikTok: {username} está ao vivo! Título: {title}")
             return {"title": title, "thumbnail": thumbnail, "url": url}
+
         except Exception as e:
             logger.warning(f"Erro TikTok {username} (tentativa {attempt+1}): {e}")
-            if attempt == retries - 1:
-                logger.error(f"Falha ao verificar TikTok para {username} após {retries} tentativas")
+            
     return None
 
 async def check_tiktok_live(username):
